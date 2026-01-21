@@ -1,47 +1,35 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Potts (q=3) Dataset Generator (Warp + Repeats)
-=============================================
+potts_gen.py
 
-Generates q=3 Potts-model microstructures (final spin configurations) with
-controls optionally passed through toy warps to induce controlled non-injectivity.
+Potts simulator that saves RAW final spin configurations (no Euler, no correlations).
+Analysis-side script computes correlations identically to the older generator.
 
-Default behavior:
-  - Runs each warp in {none, fold, ribbon, pinch}
-  - For each warp, runs both modes in {fixedseed, repeated}
-  - Stores, per run:
-      * original parameters (unwarped) : (f0, T) in physical units
-      * warped controls (used in simulation): (f0, f1, T) and derived f2
-      * final spin configurations "spins" as uint8, with optional repeats
+Outputs (new IO style):
+  potts_data/<YYYYMMDD_HHMMSSZ>/potts_sims_q{q}_{H}x{W}.h5
+  potts_data/<YYYYMMDD_HHMMSSZ>/potts_sims_q{q}_{H}x{W}.json
 
-Warp semantics:
-  - Warps are applied in normalized coordinates on [-1,1]^2 to the original (f0, T).
-  - For none/fold/pinch: the warped control remains effectively 2D; f1 is set to the
-    "usual" value f1=f2=(1-f0)/2 for initialization (i.e., no independent f1 control).
-  - For ribbon: the warped control is treated as genuinely 3D: (f0, f1, T), with
-    f2 = 1 - f0 - f1 ensured nonnegative via a stick-breaking map.
+H5 layout:
+  parameters/temperature            (N,)
+  parameters/fraction_initial       (N,)   # fraction of phase 0 in initialization
+  states/final_spins                (N, R, H, W) int8
+  attrs include config + created_utc
 
-Stochasticity control:
-  - fixedseed: one run per parameter draw with a fixed RNG seed for both initialization
-    and Monte Carlo updates (reproducible).
-  - repeated: R independent runs per parameter draw, with per-repeat RNG seeds.
-
-Outputs:
-  outdir/
-    potts__{warp}__{mode}.h5
-    potts__{warp}__{mode}.json
-
+Notes:
+  - Initial conditions match the older logic: phase 0 occupies `fraction_initial`,
+    remaining sites distributed across phases 1..q-1 via scaled uniform.
+  - Simulation uses the same batched Metropolis-like update as before.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
-import math
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Tuple
+from typing import Tuple
 
 import h5py
 import numpy as np
@@ -54,229 +42,45 @@ except Exception:  # pragma: no cover
     tqdm = None
 
 
-WarpName = Literal["none", "fold", "ribbon", "pinch"]
-SeedMode = Literal["fixedseed", "repeated"]
-
-
 def _utc_now_z() -> str:
-    # RFC3339-ish with trailing Z; timezone-aware (no utcnow())
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _run_folder_name_utc() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d_%H%M%SZ")
 
 
 @dataclass(frozen=True)
 class Config:
-    # Lattice
-    grid_size: int = 128
     q: int = 3
+    grid_size: int = 128
 
-    # Dataset size
-    n_draws: int = 1000
-    n_repeats: int = 50
+    n_param_draws: int = 1024
+    n_repeats: int = 100
+    nsteps: int = 100
 
-    # Controls (original sampling range)
-    T_range: Tuple[float, float] = (0.4, 1.2)
-    f0_range: Tuple[float, float] = (0.1, 0.9)
+    # Simulation chunking: each chunk simulates param_batch * repeat_chunk samples
+    param_batch: int = 16
+    sim_batch_size: int = 512  # max samples per chunk; repeat_chunk derived from this and param_batch
 
-    # For ribbon (3D fractions) we enforce a minimum phase fraction
-    min_phase_frac: float = 0.02
+    temp_range: Tuple[float, float] = (0.4, 1.2)
+    fraction_range: Tuple[float, float] = (0.1, 0.9)
+    seed_params: int = 42
 
-    # Dynamics
-    steps: int = 200
-    batch_size: int = 64
     periodic: bool = False
     remove_spurious: bool = False
 
-    # Warps
-    warp_strength: float = 1.0
+    out_root: str = "potts_data"
+    tag: str = "potts_sims"
 
-    # Reproducibility
-    seed_controls: int = 2468
-    seed_fixed: int = 13579
-    seed_repeat_base: int = 80000
-
-    # Storage (no compression; chunking retained for streaming writes)
-    chunk_sims: int = 1
-
-    # Device
     device: str = "cuda"
-
-
-# ----------------------------- Toy warps (normalized domain) -----------------------------
-
-@torch.no_grad()
-def warp_ribbon(p: torch.Tensor, t: float = 1.0) -> torch.Tensor:
-    y_prime = t * (0.75 * torch.pi) * (p[:, 1] + 1.0) + torch.pi / 4
-    curl = math.sin(t * torch.pi / 2)
-    x = p[:, 0]
-    y = t * p[:, 1] * torch.cos(y_prime * curl) + (1 - t) * p[:, 1]
-    z = p[:, 1] * torch.sin(y_prime * curl) + 0.5 * t**2
-    return torch.stack((x, y, z), dim=1)
-
-
-@torch.no_grad()
-def warp_fold_sheet(p: torch.Tensor, t: float) -> torch.Tensor:
-    x, y = p[:, 0], p[:, 1]
-    mask = y > -x + 1
-    x_new = x.clone()
-    y_new = y.clone()
-    z_new = torch.zeros_like(x)
-
-    if torch.any(mask):
-        px, py = x[mask], y[mask]
-        dx, dy = px - 0.5, py - 0.5
-        theta = math.pi * t
-        axis = torch.tensor([1.0, -1.0, 0.0], device=p.device)
-        axis = axis / torch.norm(axis)
-
-        points_3d = torch.stack((dx, dy, torch.zeros_like(dx)), dim=1)
-        k = axis
-        cos_t = torch.cos(torch.tensor(theta, device=p.device))
-        sin_t = torch.sin(torch.tensor(theta, device=p.device))
-
-        rotated = (
-            points_3d * cos_t
-            + torch.cross(k.expand_as(points_3d), points_3d, dim=1) * sin_t
-            + k * torch.sum(points_3d * k, dim=1, keepdim=True) * (1 - cos_t)
-        )
-
-        x_new[mask] = rotated[:, 0] + 0.5
-        y_new[mask] = rotated[:, 1] + 0.5
-
-    return torch.stack((x_new, y_new, z_new), dim=1)
-
-
-@torch.no_grad()
-def warp_pinch(p: torch.Tensor, t: float = 1.0) -> torch.Tensor:
-    x, y = p[:, 0], p[:, 1]
-    return torch.stack((x, y * torch.abs(x) ** (2 * t), torch.zeros_like(x)), dim=1)
-
-
-def apply_warp_2d(u2: torch.Tensor, warp: WarpName, t: float) -> torch.Tensor:
-    if warp == "none":
-        return u2
-    if warp == "fold":
-        return warp_fold_sheet(u2, t)[:, :2]
-    if warp == "pinch":
-        return warp_pinch(u2, t)[:, :2]
-    if warp == "ribbon":
-        return warp_ribbon(u2, t)  # (N,3)
-    raise ValueError(warp)
-
-
-# ----------------------------- Parameter sampling + warp pipeline -----------------------------
-
-def _to_unit_interval(x: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
-    return (x - lo) / (hi - lo)
-
-
-def _from_unit_interval(u: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
-    return lo + u * (hi - lo)
-
-
-def _to_pm1(x: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
-    return _to_unit_interval(x, lo, hi) * 2.0 - 1.0
-
-
-def _from_pm1(u: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
-    return _from_unit_interval((u + 1.0) * 0.5, lo, hi)
-
-
-@torch.no_grad()
-def _stick_break_fractions(u0: torch.Tensor, u1: torch.Tensor, min_frac: float) -> torch.Tensor:
-    """
-    Map (u0,u1) in [-1,1]^2 to (f0,f1,f2) with all >= min_frac and sum=1.
-    """
-    # Sharper sigmoid for better spread from normalized coords
-    v0 = torch.sigmoid(2.0 * u0)
-    v1 = torch.sigmoid(2.0 * u1)
-
-    # Reserve min fractions for all 3 phases
-    min_total = 3.0 * float(min_frac)
-    if min_total >= 1.0:
-        raise ValueError("min_phase_frac too large")
-
-    f0 = float(min_frac) + (1.0 - min_total) * v0
-    rem = 1.0 - f0 - 2.0 * float(min_frac)
-    f1 = float(min_frac) + rem * v1
-    f2 = 1.0 - f0 - f1
-    return torch.stack((f0, f1, f2), dim=1)
-
-
-@torch.no_grad()
-def sample_controls_potts(cfg: Config, warp: WarpName, device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Returns:
-      orig:  (N,2) -> (f0,T) in physical units
-      warped_controls: (N,4) -> (f0,f1,f2,T) used for simulation
-      warped_pm1: tensor of the warp output in normalized coords (for debugging / record)
-    """
-    N = cfg.n_draws
-    f0_lo, f0_hi = cfg.f0_range
-    T_lo, T_hi = cfg.T_range
-
-    g = torch.Generator(device=device).manual_seed(int(cfg.seed_controls))
-    f0 = f0_lo + (f0_hi - f0_lo) * torch.rand((N,), device=device, generator=g)
-    T = T_lo + (T_hi - T_lo) * torch.rand((N,), device=device, generator=g)
-    orig = torch.stack((f0, T), dim=1)
-
-    u_f0 = _to_pm1(f0, f0_lo, f0_hi)
-    u_T = _to_pm1(T, T_lo, T_hi)
-    u2 = torch.stack((u_f0, u_T), dim=1)
-
-    t = float(cfg.warp_strength)
-
-    if warp == "ribbon":
-        u3 = apply_warp_2d(u2, warp="ribbon", t=t)  # (N,3) in [-1,1] (clipped later)
-        u3 = u3.clamp(-1.0, 1.0)
-        u0, u1, uT = u3[:, 0], u3[:, 1], u3[:, 2]
-
-        fracs = _stick_break_fractions(u0, u1, min_frac=cfg.min_phase_frac)  # (N,3)
-        T_w = _from_pm1(uT, T_lo, T_hi)
-        warped_controls = torch.cat((fracs, T_w[:, None]), dim=1)  # (N,4)
-        return orig, warped_controls, u3
-
-    # 2D warps: compute warped (f0,T); set f1=f2=(1-f0)/2
-    u2_w = apply_warp_2d(u2, warp=warp, t=t).clamp(-1.0, 1.0)
-    f0_w = _from_pm1(u2_w[:, 0], f0_lo, f0_hi)
-    T_w = _from_pm1(u2_w[:, 1], T_lo, T_hi)
-    f1_w = 0.5 * (1.0 - f0_w)
-    f2_w = 0.5 * (1.0 - f0_w)
-    warped_controls = torch.stack((f0_w, f1_w, f2_w, T_w), dim=1)
-    return orig, warped_controls, u2_w
-
-
-# ----------------------------- Potts simulation core -----------------------------
-
-@torch.no_grad()
-def create_initial_states(
-    fractions: torch.Tensor,  # (B,3) sums to 1
-    grid_size: int,
-    gen: torch.Generator,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Vectorized initial condition: sample a uniform random field and assign states
-    by cumulative thresholds from fractions.
-    Returns spins as int8 with shape (B,1,H,W).
-    """
-    B = fractions.shape[0]
-    u = torch.rand((B, 1, grid_size, grid_size), device=device, generator=gen)
-    c0 = fractions[:, 0].view(B, 1, 1, 1)
-    c1 = (fractions[:, 0] + fractions[:, 1]).view(B, 1, 1, 1)
-
-    spins = torch.empty((B, 1, grid_size, grid_size), device=device, dtype=torch.int8)
-    spins[u < c0] = 0
-    spins[(u >= c0) & (u < c1)] = 1
-    spins[u >= c1] = 2
-    return spins
 
 
 @torch.no_grad()
 def potts_step(
     spins: torch.Tensor,
-    beta: torch.Tensor,   # (B,)
+    beta: torch.Tensor,  # (B,)
     q: int,
-    gen: torch.Generator,
     periodic: bool = False,
     remove_spurious: bool = False,
 ) -> torch.Tensor:
@@ -299,7 +103,7 @@ def potts_step(
         + (spins == right).byte()
     ).float()
 
-    new_spins = torch.randint(0, q, spins.shape, device=spins.device, generator=gen, dtype=torch.int8)
+    new_spins = torch.randint_like(spins, q, dtype=torch.int8)
 
     new_aligned = (
         (new_spins == up).byte()
@@ -312,212 +116,210 @@ def potts_step(
     beta_expanded = beta.view(-1, 1, 1, 1)
     acceptance_probs = torch.exp(beta_expanded * delta)
 
-    u = torch.rand(acceptance_probs.shape, device=spins.device, generator=gen)
-
     if remove_spurious:
-        flips = (u < acceptance_probs) & (new_aligned > 0)
+        flips = (torch.rand_like(acceptance_probs) < acceptance_probs) & (new_aligned > 0)
     else:
-        flips = (u < acceptance_probs)
+        flips = torch.rand_like(acceptance_probs) < acceptance_probs
 
-    spins = torch.where(flips, new_spins, spins)
-    return spins
+    return torch.where(flips, new_spins, spins)
 
 
 @torch.no_grad()
 def simulate_potts(
-    spins: torch.Tensor,
-    temperatures: torch.Tensor,  # (B,)
-    steps: int,
-    q: int,
-    gen: torch.Generator,
-    periodic: bool,
-    remove_spurious: bool,
+    spins: torch.Tensor, temperatures: torch.Tensor, steps: int, q: int, periodic: bool, remove_spurious: bool
 ) -> torch.Tensor:
     beta = 1.0 / temperatures
-    for _ in range(steps):
-        spins = potts_step(spins, beta, q=q, gen=gen, periodic=periodic, remove_spurious=remove_spurious)
+    for _ in range(int(steps)):
+        spins = potts_step(spins, beta, q=q, periodic=periodic, remove_spurious=remove_spurious)
     return spins
 
 
-# ----------------------------- HDF5 IO -----------------------------
-
-def _h5_create_dataset(h5: h5py.File, name: str, shape: tuple, dtype, cfg: Config):
-    # No compression by design (publication-ready reproducibility + predictable I/O)
-    kwargs = {}
-    if len(shape) == 3:
-        kwargs["chunks"] = (min(cfg.chunk_sims, shape[0]), shape[1], shape[2])
-    elif len(shape) == 4:
-        kwargs["chunks"] = (min(cfg.chunk_sims, shape[0]), 1, shape[2], shape[3])
-    return h5.create_dataset(name, shape=shape, dtype=dtype, **kwargs)
-
-
 @torch.no_grad()
-def simulate_and_write(
-    cfg: Config,
+def create_initial_states(
+    batch_size: int,
+    grid_size: int,
+    fractions: torch.Tensor,  # (B,) fraction of phase 0
+    q: int,
+    seeds: torch.Tensor,      # (B,)
     device: torch.device,
-    warped_controls: torch.Tensor,  # (N,4) (f0,f1,f2,T)
-    h5_spins: h5py.Dataset,
-    mode: SeedMode,
-    progress_desc: str,
-):
-    N = int(warped_controls.shape[0])
-    H = W = int(cfg.grid_size)
+) -> torch.Tensor:
+    states = torch.zeros((batch_size, 1, grid_size, grid_size), dtype=torch.int8, device=device)
+    for i, (fraction, seed) in enumerate(zip(fractions, seeds)):
+        rand_grid = torch.rand(grid_size, grid_size, device=device)
+        mask_0 = rand_grid < fraction
+        states[i, 0][mask_0] = 0
 
-    fracs = warped_controls[:, :3].to(device=device, dtype=torch.float32, non_blocking=True)
-    temps = warped_controls[:, 3].to(device=device, dtype=torch.float32, non_blocking=True)
-
-    n_runs = cfg.n_repeats if mode == "repeated" else 1
-    n_batches = (N + int(cfg.batch_size) - 1) // int(cfg.batch_size)
-    total_batches = n_runs * n_batches
-
-    pbar = None
-    if tqdm is not None:
-        pbar = tqdm(total=total_batches, desc=progress_desc, unit="batch", dynamic_ncols=True)
-
-    processed = 0
-    for r in range(n_runs):
-        seed_r = (cfg.seed_repeat_base + r) if mode == "repeated" else cfg.seed_fixed
-        gen = torch.Generator(device=device).manual_seed(int(seed_r))
-
-        for start in range(0, N, cfg.batch_size):
-            end = min(N, start + cfg.batch_size)
-            B = end - start
-
-            spins0 = create_initial_states(fracs[start:end], grid_size=H, gen=gen, device=device)
-            spinsF = simulate_potts(
-                spins0,
-                temperatures=temps[start:end],
-                steps=int(cfg.steps),
-                q=int(cfg.q),
-                gen=gen,
-                periodic=bool(cfg.periodic),
-                remove_spurious=bool(cfg.remove_spurious),
-            )
-
-            # store as (H,W) per sample; strip channel dim
-            out = spinsF[:, 0].detach().to("cpu", dtype=torch.uint8).numpy()
-
-            if mode == "fixedseed":
-                h5_spins[start:end, :, :] = out
-            else:
-                h5_spins[start:end, r, :, :] = out
-
-            processed += 1
-            if pbar is not None:
-                pbar.update(1)
-            elif processed % 10 == 0 or processed == total_batches:
-                print(f"[{progress_desc}] {processed}/{total_batches} batches")
-
-    if pbar is not None:
-        pbar.close()
+        remaining_mask = ~mask_0
+        if int(remaining_mask.sum().item()) > 0:
+            remaining_rand = (rand_grid[remaining_mask] - fraction) / (1.0 - fraction)
+            other_states = 1 + (remaining_rand * float(q - 1)).to(torch.int8)
+            states[i, 0][remaining_mask] = other_states
+    return states
 
 
-def _write_run(cfg: Config, outdir: Path, warp: WarpName, mode: SeedMode):
-    outdir.mkdir(parents=True, exist_ok=True)
-    device = torch.device(cfg.device if torch.cuda.is_available() and cfg.device.startswith("cuda") else "cpu")
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out_root", type=str, default=Config.out_root)
+    ap.add_argument("--tag", type=str, default=Config.tag)
 
-    orig, warped_controls, warped_pm1 = sample_controls_potts(cfg, warp=warp, device=device)
+    ap.add_argument("--q", type=int, default=Config.q)
+    ap.add_argument("--grid_size", type=int, default=Config.grid_size)
 
-    tag = f"potts__{warp}__{mode}"
-    h5_path = outdir / f"{tag}.h5"
-    js_path = outdir / f"{tag}.json"
+    ap.add_argument("--n_param_draws", type=int, default=Config.n_param_draws)
+    ap.add_argument("--n_repeats", type=int, default=Config.n_repeats)
+    ap.add_argument("--nsteps", type=int, default=Config.nsteps)
 
-    N = cfg.n_draws
-    R = cfg.n_repeats if mode == "repeated" else 1
-    H = W = cfg.grid_size
+    ap.add_argument("--param_batch", type=int, default=Config.param_batch)
+    ap.add_argument("--sim_batch_size", type=int, default=Config.sim_batch_size)
 
-    with h5py.File(h5_path, "w") as h5:
-        h5.attrs["created_utc"] = _utc_now_z()
-        h5.attrs["warp"] = warp
-        h5.attrs["mode"] = mode
-        h5.attrs["q"] = int(cfg.q)
+    ap.add_argument("--T_lo", type=float, default=Config.temp_range[0])
+    ap.add_argument("--T_hi", type=float, default=Config.temp_range[1])
+    ap.add_argument("--f_lo", type=float, default=Config.fraction_range[0])
+    ap.add_argument("--f_hi", type=float, default=Config.fraction_range[1])
 
-        h5.create_dataset("params_original", data=orig.detach().cpu().numpy().astype(np.float32))
-        h5.create_dataset("controls_warped", data=warped_controls.detach().cpu().numpy().astype(np.float32))
-        h5.create_dataset("controls_warped_pm1", data=warped_pm1.detach().cpu().numpy().astype(np.float32))
+    ap.add_argument("--periodic", action="store_true")
+    ap.add_argument("--remove_spurious", action="store_true")
 
-        if mode == "fixedseed":
-            spins = _h5_create_dataset(h5, "spins", shape=(N, H, W), dtype=np.uint8, cfg=cfg)
-        else:
-            spins = _h5_create_dataset(h5, "spins", shape=(N, R, H, W), dtype=np.uint8, cfg=cfg)
+    ap.add_argument("--seed_params", type=int, default=Config.seed_params)
+    ap.add_argument("--device", type=str, default=Config.device)
 
-        simulate_and_write(
-            cfg,
-            device=device,
-            warped_controls=warped_controls.cpu(),
-            h5_spins=spins,
-            mode=mode,
-            progress_desc=f"Potts {warp} {mode}",
-        )
+    args = ap.parse_args()
 
-    meta = dict(
-        created_utc=_utc_now_z(),
-        script=str(Path(__file__).name),
-        warp=warp,
-        mode=mode,
-        config=asdict(cfg),
-        outputs=dict(h5=str(h5_path)),
-    )
-    js_path.write_text(json.dumps(meta, indent=2))
-    print(f"[OK] wrote {h5_path}")
-
-
-# ----------------------------- CLI -----------------------------
-
-def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--outdir", type=str, default="potts_data")
-    p.add_argument("--device", type=str, default=Config.device)
-    p.add_argument("--n-draws", type=int, default=Config.n_draws)
-    p.add_argument("--n-repeats", type=int, default=Config.n_repeats)
-    p.add_argument("--grid-size", type=int, default=Config.grid_size)
-    p.add_argument("--steps", type=int, default=Config.steps)
-    p.add_argument("--batch-size", type=int, default=Config.batch_size)
-    p.add_argument("--warp-strength", type=float, default=Config.warp_strength)
-
-    p.add_argument("--T-lo", type=float, default=Config.T_range[0])
-    p.add_argument("--T-hi", type=float, default=Config.T_range[1])
-    p.add_argument("--f0-lo", type=float, default=Config.f0_range[0])
-    p.add_argument("--f0-hi", type=float, default=Config.f0_range[1])
-    p.add_argument("--min-phase-frac", type=float, default=Config.min_phase_frac)
-
-    p.add_argument("--periodic", action="store_true")
-    p.add_argument("--remove-spurious", action="store_true")
-
-    p.add_argument("--only-warp", type=str, default=None, choices=[None, "none", "fold", "ribbon", "pinch"])
-    p.add_argument("--only-mode", type=str, default=None, choices=[None, "fixedseed", "repeated"])
-    return p.parse_args()
-
-
-def main():
-    args = _parse_args()
     cfg = Config(
-        device=args.device,
-        n_draws=int(args.n_draws),
-        n_repeats=int(args.n_repeats),
+        q=int(args.q),
         grid_size=int(args.grid_size),
-        steps=int(args.steps),
-        batch_size=int(args.batch_size),
-        warp_strength=float(args.warp_strength),
-        T_range=(float(args.T_lo), float(args.T_hi)),
-        f0_range=(float(args.f0_lo), float(args.f0_hi)),
-        min_phase_frac=float(args.min_phase_frac),
+        n_param_draws=int(args.n_param_draws),
+        n_repeats=int(args.n_repeats),
+        nsteps=int(args.nsteps),
+        param_batch=int(args.param_batch),
+        sim_batch_size=int(args.sim_batch_size),
+        temp_range=(float(args.T_lo), float(args.T_hi)),
+        fraction_range=(float(args.f_lo), float(args.f_hi)),
         periodic=bool(args.periodic),
         remove_spurious=bool(args.remove_spurious),
+        seed_params=int(args.seed_params),
+        out_root=str(args.out_root),
+        tag=str(args.tag),
+        device=str(args.device),
     )
 
-    outdir = Path(args.outdir)
-    warps: list[WarpName] = ["none", "fold", "ribbon", "pinch"]
-    modes: list[SeedMode] = ["fixedseed", "repeated"]
+    use_cuda = torch.cuda.is_available() and str(cfg.device).startswith("cuda")
+    device = torch.device(cfg.device if use_cuda else "cpu")
+    print(f"[potts_gen] device={device}")
 
-    if args.only_warp is not None:
-        warps = [args.only_warp]  # type: ignore[assignment]
-    if args.only_mode is not None:
-        modes = [args.only_mode]  # type: ignore[assignment]
+    torch.manual_seed(int(cfg.seed_params))
 
-    for w in warps:
-        for m in modes:
-            _write_run(cfg, outdir=outdir, warp=w, mode=m)
+    N = int(cfg.n_param_draws)
+    R = int(cfg.n_repeats)
+    H = W = int(cfg.grid_size)
+    q = int(cfg.q)
+
+    temperatures = torch.empty((N,), device="cpu").uniform_(float(cfg.temp_range[0]), float(cfg.temp_range[1]))
+    fractions_param = torch.empty((N,), device="cpu").uniform_(float(cfg.fraction_range[0]), float(cfg.fraction_range[1]))
+
+    out_root = Path(cfg.out_root)
+    run_dir = out_root / _run_folder_name_utc()
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    base = f"{cfg.tag}_q{q}_{H}x{W}"
+    h5_path = run_dir / f"{base}.h5"
+    js_path = run_dir / f"{base}.json"
+
+    # Chunking: per parameter-batch, simulate repeat_chunk repeats at a time
+    P = max(1, int(cfg.param_batch))
+    maxB = max(1, int(cfg.sim_batch_size))
+    repeat_chunk = max(1, maxB // P)
+
+    created_utc = _utc_now_z()
+
+    with h5py.File(h5_path, "w") as f:
+        f.attrs["created_utc"] = created_utc
+        f.attrs["config_json"] = json.dumps(asdict(cfg))
+        f.attrs["n_parameters"] = N
+        f.attrs["n_repeats"] = R
+        f.attrs["grid_size"] = H
+        f.attrs["q"] = q
+        f.attrs["layout"] = "states/final_spins is (N, R, H, W) int8"
+
+        grp_p = f.create_group("parameters")
+        grp_p.create_dataset("temperature", data=temperatures.numpy().astype(np.float32))
+        grp_p.create_dataset("fraction_initial", data=fractions_param.numpy().astype(np.float32))
+
+        grp_s = f.create_group("states")
+        dset = grp_s.create_dataset(
+            "final_spins",
+            shape=(N, R, H, W),
+            dtype=np.int8,
+            chunks=(1, min(R, max(1, repeat_chunk)), H, W),
+            compression="gzip",
+        )
+
+        outer = range(0, N, P)
+        if tqdm:
+            outer = tqdm(outer, desc="potts_gen param-batches", total=(N + P - 1) // P)
+
+        for pb in outer:
+            pe = min(N, pb + P)
+            Pb = pe - pb
+
+            t_pb = temperatures[pb:pe].to(torch.float32)  # CPU
+            f_pb = fractions_param[pb:pe].to(torch.float32)
+
+            # Repeat chunks
+            for rb in range(0, R, repeat_chunk):
+                re = min(R, rb + repeat_chunk)
+                Rc = re - rb
+                B = Pb * Rc
+
+                temps = t_pb.repeat_interleave(Rc).to(device=device)
+                fracs = f_pb.repeat_interleave(Rc).to(device=device)
+
+                # deterministic per-sample init seeds (for the init only)
+                # seed space avoids overlap across (pb,rb)
+                base_seed = (pb * R + rb) + 1000
+                seeds = torch.arange(base_seed, base_seed + B, dtype=torch.int64, device=device)
+
+                states0 = create_initial_states(
+                    batch_size=B,
+                    grid_size=H,
+                    fractions=fracs,
+                    q=q,
+                    seeds=seeds,
+                    device=device,
+                )
+                final_states = simulate_potts(
+                    states0,
+                    temperatures=temps,
+                    steps=int(cfg.nsteps),
+                    q=q,
+                    periodic=bool(cfg.periodic),
+                    remove_spurious=bool(cfg.remove_spurious),
+                )
+                final_cpu = final_states[:, 0].detach().cpu().numpy().astype(np.int8, copy=False)  # (B,H,W)
+
+                # reshape back to (Pb,Rc,H,W) aligned with (pb:pe, rb:re)
+                final_cpu = final_cpu.reshape(Pb, Rc, H, W)
+                dset[pb:pe, rb:re, :, :] = final_cpu
+
+                del states0, final_states
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+
+    meta = {
+        "created_utc": created_utc,
+        "run_dir": str(run_dir),
+        "h5": str(h5_path),
+        "config": asdict(cfg),
+        "description": {
+            "parameters/temperature": "(N,) sampled temperatures",
+            "parameters/fraction_initial": "(N,) sampled init fraction for phase 0",
+            "states/final_spins": "(N,R,H,W) int8 raw final spins for each parameter draw and repeat",
+        },
+    }
+    js_path.write_text(json.dumps(meta, indent=2))
+
+    print(f"[potts_gen] wrote: {h5_path}")
+    print(f"[potts_gen] wrote: {js_path}")
 
 
 if __name__ == "__main__":
