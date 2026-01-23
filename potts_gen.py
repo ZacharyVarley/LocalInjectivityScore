@@ -55,7 +55,7 @@ class Config:
     q: int = 3
     grid_size: int = 128
 
-    n_param_draws: int = 1024
+    n_param_draws: int = 1000
     n_repeats: int = 100
     nsteps: int = 100
 
@@ -67,7 +67,7 @@ class Config:
     fraction_range: Tuple[float, float] = (0.1, 0.9)
     seed_params: int = 42
 
-    periodic: bool = False
+    periodic: bool = True
     remove_spurious: bool = False
 
     out_root: str = "potts_data"

@@ -3,56 +3,20 @@
 """
 potts_analyze.py
 
-End-to-end Potts analysis (no helper file):
-  1) Reads RAW spins from potts_gen output:
-       parameters/temperature            (N,)
-       parameters/fraction_initial       (N,)
-       states/final_spins                (N,R,H,W) int8
+Simplified Potts analysis:
+  1) Reads RAW spins from potts_gen output
+  2) Computes correlations_2d and correlations_radial with whitening (1e-3)
+  3) Builds descriptor Y from ensemble means
+  4) Computes local injectivity diagnostics
+  5) Generates plots
 
-  2) Computes (identical to the older generator):
-       - correlations_2d_mean    (N,n_pairs,H,W)        mean over repeats
-       - correlations_radial_mean/std (N,n_pairs,n_bins) mean/std over repeats
-       - final_fraction_mean/std (N,q)                  mean/std over repeats
-
-     Correlations definition (matches old script):
-       For each phase pair (i<=j):
-         ind_i = 1[spin==i], ind_j = 1[spin==j]
-         mean-subtract each over (H,W)
-         corr = ifft2( fft(ind_i) * conj(fft(ind_j)) ) / (H*W)
-         fftshift to center zero-lag
-
-     Radial average definition (matches old script):
-       bins defined by edges linspace(0, H//2, n_bins+1)
-       bin assignment via searchsorted(edges[:-1], r), clamped
-       averages computed by scatter_add into bins.
-
-  3) Builds descriptor Y from the per-parameter ENSEMBLE MEAN over repeats (old style):
-       kind=radial1d: Y = radial_mean.flatten()
-       kind=corr2d:   Y = corr2d_mean.flatten()
-       optionally prepend phase fractions (default True):
-         Y = [phi0..phi_{q-1} | descriptor]
-
-  4) Computes local injectivity diagnostics (old injectivity script logic):
-       - kNN in Y (exact, chunked torch.cdist)
-       - local dual ridge regression with LOO residuals
-       - explained_frac, worst_retention, coordinate-wise unexplained, etc.
-
-  5) Generates plots (like old injectivity script):
-       - scatter in (temperature, fraction_initial)
-       - binned heatmaps with NaN-aware Gaussian smoothing (pure numpy)
-
-Outputs (new IO style):
+Outputs:
   potts_analysis/<YYYYMMDD_HHMMSSZ>/<input_stem>/<descriptor_kind>/
     potts_stats_q{q}_{H}x{W}.h5
     potts_stats_q{q}_{H}x{W}.json
     potts_local_explainedcov_injectivity.csv
     figs/*.png + *.pdf
     metadata_local_explainedcov_injectivity.json
-
-Cache:
-  potts_analysis/.../<descriptor_kind>/cache/Y_cache.npz  (X,Y)
-
-No Euler characteristic support.
 """
 
 from __future__ import annotations
@@ -70,11 +34,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-
-try:
-    from tqdm import tqdm  # type: ignore
-except Exception:  # pragma: no cover
-    tqdm = None
 
 
 DescKind = Literal["radial1d", "corr2d"]
@@ -129,22 +88,22 @@ class Config:
     potts_analysis_dir: str = "potts_analysis"
     tag: str = "potts_stats"
 
-    # descriptor: DescKind = "radial1d"
     descriptor: DescKind = "corr2d"
     n_radial_bins: int = 64
 
     prepend_phase_fractions_to_Y: bool = False
+    
+    # Whitening regularization for correlations
+    whiten_eps: float = 1e-2
 
-    # Build/compute chunking
-    param_batch: int = 8
-    repeat_chunk: int = 16
+    # Batching for memory management
+    batch_size: int = 256
 
-    # Injectivity metric knobs (old script defaults)
+    # Injectivity metric knobs
     standardize_X: bool = True
     standardize_Y: bool = True
 
     kY: int = 15
-    knn_chunk: int = 512
 
     use_weights: bool = False
     eps_tau: float = 1e-12
@@ -153,7 +112,6 @@ class Config:
     ridge_x: float = 1e-8
     eps_trace: float = 1e-18
 
-    batch_size: int = 128  # metric batching (VRAM control)
     device: str = "cuda"
 
     # Plot controls
@@ -166,8 +124,6 @@ class Config:
     hm_sigma_px: float = 1.0
     hm_clip: Tuple[float, float] = (1.0, 99.0)
 
-    force_recompute: bool = False
-
 
 def _pair_labels(q: int) -> List[str]:
     return [f"{i}-{j}" for i in range(q) for j in range(i, q)]
@@ -176,10 +132,10 @@ def _pair_labels(q: int) -> List[str]:
 # ----------------------------- old-correct Potts correlation ops -----------------------------
 
 @torch.no_grad()
-def compute_correlations_2d(spins: torch.Tensor, q: int) -> torch.Tensor:
+def compute_correlations_2d(spins: torch.Tensor, q: int, whiten_eps: float = 1e-3) -> torch.Tensor:
     """
     spins: (B,1,H,W) int8
-    returns: (B, n_pairs, H, W) float32
+    returns: (B, n_pairs, H, W) float32 with whitening applied
     """
     B, _, H, W = spins.shape
     n_pairs = q * (q + 1) // 2
@@ -201,15 +157,18 @@ def compute_correlations_2d(spins: torch.Tensor, q: int) -> torch.Tensor:
 
             out[:, pair_idx] = torch.fft.fftshift(corr, dim=(-2, -1))
             pair_idx += 1
+    
+    # Apply whitening: add small constant to diagonal
+    out = out + whiten_eps
 
     return out
 
 
 @torch.no_grad()
-def compute_radial_average(correlations_2d: torch.Tensor, n_bins: int) -> torch.Tensor:
+def compute_radial_average(correlations_2d: torch.Tensor, n_bins: int, whiten_eps: float = 1e-3) -> torch.Tensor:
     """
     correlations_2d: (B,n_pairs,H,W)
-    returns: (B,n_pairs,n_bins)
+    returns: (B,n_pairs,n_bins) with whitening applied
     """
     B, n_pairs, H, W = correlations_2d.shape
     center = H // 2
@@ -237,7 +196,12 @@ def compute_radial_average(correlations_2d: torch.Tensor, n_bins: int) -> torch.
     counts.scatter_add_(1, expanded, torch.ones_like(flat_corr))
 
     radial = torch.where(counts > 0, sums / counts, torch.zeros_like(sums))
-    return radial.view(B, n_pairs, int(n_bins))
+    radial = radial.view(B, n_pairs, int(n_bins))
+    
+    # Apply whitening: add small constant
+    radial = radial + whiten_eps
+    
+    return radial
 
 
 @torch.no_grad()
@@ -371,33 +335,26 @@ def to_t(x: np.ndarray, device: torch.device) -> torch.Tensor:
 
 
 @torch.no_grad()
-def knn_in_y_chunked(Y: torch.Tensor, k: int, chunk: int = 512) -> Tuple[torch.Tensor, torch.Tensor]:
+def knn_in_y(Y: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute k nearest neighbors in Y."""
     device = Y.device
     N = Y.shape[0]
     k = min(int(k), N - 1)
-    idx_out = torch.empty((N, k), device=device, dtype=torch.int64)
-    d_out = torch.empty((N, k), device=device, dtype=torch.float32)
-
-    for s in range(0, N, int(chunk)):
-        e = min(N, s + int(chunk))
-        Dc = torch.cdist(Y[s:e], Y, p=2.0)  # (c,N)
-        r = torch.arange(e - s, device=device)
-        c = torch.arange(s, e, device=device)
-        Dc[r, c] = float("inf")
-
-        vals, idx = torch.topk(Dc, k=k, largest=False, sorted=False)
-        ord_local = torch.argsort(vals, dim=1)
-        vals_s = torch.gather(vals, dim=1, index=ord_local)
-        idx_s = torch.gather(idx, dim=1, index=ord_local)
-
-        idx_out[s:e] = idx_s
-        d_out[s:e] = vals_s
-
-    return idx_out, d_out
+    
+    # Compute all pairwise distances
+    Dc = torch.cdist(Y, Y, p=2.0)  # (N,N)
+    
+    # Set self-distances to infinity
+    Dc.fill_diagonal_(float("inf"))
+    
+    # Get top k nearest neighbors
+    vals, idx = torch.topk(Dc, k=k, largest=False, sorted=True)
+    
+    return idx, vals
 
 
 @torch.no_grad()
-def local_explainedcov_metrics_batched_LOO(
+def local_explainedcov_metrics_LOO(
     X: torch.Tensor,          # (N,p)
     Y: torch.Tensor,          # (N,qy)
     idxY: torch.Tensor,       # (N,kY) excluding self
@@ -407,30 +364,11 @@ def local_explainedcov_metrics_batched_LOO(
     ridge_y: float,
     ridge_x: float,
     eps_trace: float,
-    batch_size: int = 512,
+    batch_size: int = 256,
 ) -> Dict[str, np.ndarray]:
     """
-    Kernel ridge in neighborhood, scored by LOO residuals (not training error).
-
-    Neighborhood for each i: J = {i} ∪ kNN_Y(i), size k = kY+1.
-
-    Weighted centering:
-      Xs = sqrt(w) * (X - muX)
-      Ys = sqrt(w) * (Y - muY)
-
-    Linear kernel:
-      K = Ys Ys^T
-
-    Ridge scale:
-      lam = ridge_y * tr(K)/k
-
-    LOO residual identity for kernel ridge:
-      alpha = (K + lam I)^(-1) Xs
-      Hinv  = (K + lam I)^(-1)
-      Rloo_t = alpha_t / Hinv_tt
-
-    explained_frac = 1 - ||Rloo||^2/(||Xs||^2 + eps)
-    plus directional worst-case diagnostic via generalized eigenvalue.
+    Kernel ridge in neighborhood, scored by LOO residuals.
+    Batched over N to reduce memory.
     """
     device = X.device
     N, p = X.shape
@@ -454,10 +392,11 @@ def local_explainedcov_metrics_batched_LOO(
     I_k = torch.eye(k, device=device, dtype=torch.float32)
     I_p = torch.eye(p, device=device, dtype=torch.float32)
 
+    # Process in batches to reduce memory
     for i0 in range(0, N, int(batch_size)):
         i1 = min(N, i0 + int(batch_size))
         B = i1 - i0
-
+        
         centers = torch.arange(i0, i1, device=device, dtype=torch.int64)
         neigh = torch.cat([centers[:, None], idxY[i0:i1]], dim=1)  # (B,k)
 
@@ -550,14 +489,6 @@ def local_explainedcov_metrics_batched_LOO(
     return out
 
 
-# ----------------------------- cache + build stats/Y -----------------------------
-
-def _cache_path(root_desc: Path, cfg: Config) -> Path:
-    # cache depends on descriptor + nbins + prepend flag
-    tag = f"Y_{cfg.descriptor}_nb{cfg.n_radial_bins}_pre{1 if cfg.prepend_phase_fractions_to_Y else 0}"
-    return root_desc / "cache" / f"{tag}.npz"
-
-
 def build_stats_and_Y(
     in_h5: Path,
     out_h5: Path,
@@ -567,183 +498,159 @@ def build_stats_and_Y(
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """
     Computes stats H5 and returns (X,Y) for injectivity.
-    X ordering matches old injectivity script: (temperature, fraction_initial).
-    Y built from ENSEMBLE MEANS across repeats.
+    Simplified - no batching or chunking.
     """
     ensure_dir(out_h5.parent)
-    ensure_dir(root_desc / "cache")
 
     use_cuda = torch.cuda.is_available() and str(cfg.device).startswith("cuda")
     device = torch.device(cfg.device if use_cuda else "cpu")
 
     created_utc = _utc_now_z()
 
+    print("[potts_analyze] Loading data from H5...")
     with h5py.File(str(in_h5), "r") as fin:
-        temps = np.array(fin["parameters/temperature"], dtype=np.float32)            # (N,)
-        fracs_init = np.array(fin["parameters/fraction_initial"], dtype=np.float32) # (N,)
+        temps = np.array(fin["parameters/temperature"], dtype=np.float32)
+        fracs_init = np.array(fin["parameters/fraction_initial"], dtype=np.float32)
+        spins_data = np.array(fin["states/final_spins"], dtype=np.int8)  # (N,R,H,W)
 
-        spins_dset = fin["states/final_spins"]
-        if spins_dset.ndim != 4:
-            raise RuntimeError("Expected states/final_spins shape (N,R,H,W).")
+        N, R, H, W = spins_data.shape
+        q = int(fin.attrs.get("q", 3))
+        
+    n_pairs = q * (q + 1) // 2
+    pair_labels = _pair_labels(q)
 
-        N, R, H, W = map(int, spins_dset.shape)
+    # Radial bin centers
+    max_r = H // 2
+    edges = torch.linspace(0, float(max_r), int(cfg.n_radial_bins) + 1)
+    radial_bins = ((edges[:-1] + edges[1:]) * 0.5).cpu().numpy().astype(np.float32)
 
-        q = int(fin.attrs["q"]) if "q" in fin.attrs else None
-        if q is None:
-            raise RuntimeError("Missing attribute 'q' in input H5.")
-        q = int(q)
-        n_pairs = q * (q + 1) // 2
-        pair_labels = _pair_labels(q)
+    # Decide Y dimension
+    if cfg.descriptor == "radial1d":
+        base_dim = n_pairs * int(cfg.n_radial_bins)
+    else:
+        base_dim = n_pairs * H * W
+    ydim = (q + base_dim) if cfg.prepend_phase_fractions_to_Y else base_dim
 
-        if temps.shape[0] != N or fracs_init.shape[0] != N:
-            raise RuntimeError("Mismatch: parameter arrays must have length N.")
+    X = np.stack([temps, fracs_init], axis=1).astype(np.float32)  # (N,2)
+    Y = np.empty((N, ydim), dtype=np.float32)
 
-        # Radial bin centers (same as older generator)
-        max_r = H // 2
-        edges = torch.linspace(0, float(max_r), int(cfg.n_radial_bins) + 1)
-        radial_bins = ((edges[:-1] + edges[1:]) * 0.5).cpu().numpy().astype(np.float32)
+    print(f"[potts_analyze] Computing correlations for {N} parameters, {R} repeats...")
+    
+    # Allocate output arrays
+    mean2d = np.zeros((N, n_pairs, H, W), dtype=np.float32)
+    mean1d = np.zeros((N, n_pairs, int(cfg.n_radial_bins)), dtype=np.float32)
+    std1d = np.zeros((N, n_pairs, int(cfg.n_radial_bins)), dtype=np.float32)
+    meanph = np.zeros((N, q), dtype=np.float32)
+    stdph = np.zeros((N, q), dtype=np.float32)
+    
+    # Batch over N to reduce memory usage
+    batch_size = min(int(cfg.batch_size), N)
+    for i in range(0, N, batch_size):
+        i_end = min(i + batch_size, N)
+        batch_n = i_end - i
+        
+        if i % (batch_size * 4) == 0 or i == 0:
+            print(f"[potts_analyze] Processing parameters {i}/{N}...")
+        
+        # Accumulate statistics over R dimension in batches to avoid VRAM overflow
+        # Determine batch size for repeats - be conservative with VRAM
+        # Aim for ~200MB per batch: batch_n * repeat_batch * H * W * 4 bytes * n_pairs * 2 < 200MB
+        # Factor of 2 for intermediate tensors, n_pairs for correlation outputs
+        max_elements = 50 * 1024 * 1024  # ~200MB / 4 bytes
+        repeat_batch = max(1, min(R, max_elements // (batch_n * H * W)))
+        
+        sum2d = np.zeros((batch_n, n_pairs, H, W), dtype=np.float64)
+        sum1d = np.zeros((batch_n, n_pairs, int(cfg.n_radial_bins)), dtype=np.float64)
+        sumsq1d = np.zeros((batch_n, n_pairs, int(cfg.n_radial_bins)), dtype=np.float64)
+        sumph = np.zeros((batch_n, q), dtype=np.float64)
+        sumsqph = np.zeros((batch_n, q), dtype=np.float64)
+        
+        for r in range(0, R, repeat_batch):
+            r_end = min(r + repeat_batch, R)
+            r_batch = r_end - r
+            
+            # Load only this repeat batch to device
+            spins_batch = torch.as_tensor(spins_data[i:i_end, r:r_end], device=device)  # (batch_n, r_batch, H, W)
+            spins_batch = spins_batch.reshape(batch_n * r_batch, 1, H, W)
+            
+            # Compute correlations
+            corr2d_batch = compute_correlations_2d(spins_batch, q=q, whiten_eps=cfg.whiten_eps)
+            rad_batch = compute_radial_average(corr2d_batch, n_bins=int(cfg.n_radial_bins), whiten_eps=cfg.whiten_eps)
+            ph_batch = compute_phase_fractions(spins_batch, q=q)
+            
+            # Reshape to separate batch_n and r_batch
+            corr2d_batch = corr2d_batch.reshape(batch_n, r_batch, n_pairs, H, W)
+            rad_batch = rad_batch.reshape(batch_n, r_batch, n_pairs, int(cfg.n_radial_bins))
+            ph_batch = ph_batch.reshape(batch_n, r_batch, q)
+            
+            # Accumulate statistics
+            sum2d += corr2d_batch.sum(dim=1).cpu().numpy()
+            sum1d += rad_batch.sum(dim=1).cpu().numpy()
+            sumsq1d += (rad_batch ** 2).sum(dim=1).cpu().numpy()
+            sumph += ph_batch.sum(dim=1).cpu().numpy()
+            sumsqph += (ph_batch ** 2).sum(dim=1).cpu().numpy()
+            
+            # Clean up GPU memory
+            del spins_batch, corr2d_batch, rad_batch, ph_batch
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        
+        # Compute statistics from accumulated sums
+        mean2d[i:i_end] = (sum2d / R).astype(np.float32)
+        mean1d[i:i_end] = (sum1d / R).astype(np.float32)
+        var1d = (sumsq1d / R) - (sum1d / R) ** 2
+        std1d[i:i_end] = np.sqrt(np.maximum(var1d, 0.0)).astype(np.float32)
+        meanph[i:i_end] = (sumph / R).astype(np.float32)
+        varph = (sumsqph / R) - (sumph / R) ** 2
+        stdph[i:i_end] = np.sqrt(np.maximum(varph, 0.0)).astype(np.float32)
+    
+    print("[potts_analyze] Computing statistics... done")
 
-        # Decide Y dimension
+    # Write stats H5
+    print(f"[potts_analyze] Writing stats to {out_h5}...")
+    with h5py.File(str(out_h5), "w") as fout:
+        fout.attrs["created_utc"] = created_utc
+        fout.attrs["input_h5"] = str(in_h5)
+        fout.attrs["config_json"] = json.dumps(asdict(cfg))
+        fout.attrs["n_parameters"] = N
+        fout.attrs["n_repeats"] = R
+        fout.attrs["grid_size"] = H
+        fout.attrs["q"] = q
+        fout.attrs["n_correlation_pairs"] = n_pairs
+
+        gp = fout.create_group("parameters")
+        gp.create_dataset("temperature", data=temps)
+        gp.create_dataset("fraction_initial", data=fracs_init)
+
+        gm = fout.create_group("metadata")
+        gm.create_dataset("radial_bins", data=radial_bins)
+        gm.create_dataset("pair_labels", data=np.array([s.encode() for s in pair_labels], dtype="S"))
+        gm.create_dataset("phase_labels", data=np.arange(q, dtype=np.int32))
+
+        gc = fout.create_group("correlations")
+        gc.create_dataset("correlations_2d_mean", data=mean2d, compression="gzip")
+        gc.create_dataset("correlations_radial_mean", data=mean1d, compression="gzip")
+        gc.create_dataset("correlations_radial_std", data=std1d, compression="gzip")
+
+        gpz = fout.create_group("phases")
+        gpz.create_dataset("final_fraction_mean", data=meanph)
+        gpz.create_dataset("final_fraction_std", data=stdph)
+
+        # Build Y from ensemble means
         if cfg.descriptor == "radial1d":
-            base_dim = n_pairs * int(cfg.n_radial_bins)
+            feat = mean1d.reshape(N, -1)
         else:
-            base_dim = n_pairs * H * W
-        ydim = (q + base_dim) if cfg.prepend_phase_fractions_to_Y else base_dim
+            feat = mean2d.reshape(N, -1)
 
-        X = np.stack([temps, fracs_init], axis=1).astype(np.float32)  # (N,2)
-        Y = np.empty((N, ydim), dtype=np.float32)
+        if cfg.prepend_phase_fractions_to_Y:
+            Y = np.concatenate([meanph, feat], axis=1)
+        else:
+            Y = feat
 
-        # Write stats H5
-        with h5py.File(str(out_h5), "w") as fout:
-            fout.attrs["created_utc"] = created_utc
-            fout.attrs["input_h5"] = str(in_h5)
-            fout.attrs["config_json"] = json.dumps(asdict(cfg))
-            fout.attrs["n_parameters"] = N
-            fout.attrs["n_repeats"] = R
-            fout.attrs["grid_size"] = H
-            fout.attrs["q"] = q
-            fout.attrs["n_correlation_pairs"] = n_pairs
-
-            gp = fout.create_group("parameters")
-            gp.create_dataset("temperature", data=temps)
-            gp.create_dataset("fraction_initial", data=fracs_init)
-
-            gm = fout.create_group("metadata")
-            gm.create_dataset("radial_bins", data=radial_bins)
-            gm.create_dataset("pair_labels", data=np.array([s.encode() for s in pair_labels], dtype="S"))
-            gm.create_dataset("phase_labels", data=np.arange(q, dtype=np.int32))
-
-            gc = fout.create_group("correlations")
-            d_corr2d = gc.create_dataset(
-                "correlations_2d_mean",
-                shape=(N, n_pairs, H, W),
-                dtype=np.float32,
-                chunks=(1, 1, H, W),
-                compression="gzip",
-            )
-            d_rad_m = gc.create_dataset(
-                "correlations_radial_mean",
-                shape=(N, n_pairs, int(cfg.n_radial_bins)),
-                dtype=np.float32,
-                chunks=(1, 1, int(cfg.n_radial_bins)),
-                compression="gzip",
-            )
-            d_rad_s = gc.create_dataset(
-                "correlations_radial_std",
-                shape=(N, n_pairs, int(cfg.n_radial_bins)),
-                dtype=np.float32,
-                chunks=(1, 1, int(cfg.n_radial_bins)),
-                compression="gzip",
-            )
-
-            gpz = fout.create_group("phases")
-            d_ph_m = gpz.create_dataset("final_fraction_mean", shape=(N, q), dtype=np.float32)
-            d_ph_s = gpz.create_dataset("final_fraction_std", shape=(N, q), dtype=np.float32)
-
-            # Store built Y too (useful to confirm consistency)
-            gy = fout.create_group("Y")
-            gy.attrs["descriptor"] = cfg.descriptor
-            gy.attrs["prepend_phase_fractions_to_Y"] = int(cfg.prepend_phase_fractions_to_Y)
-            dY = gy.create_dataset("Y_mean_descriptor", shape=(N, ydim), dtype=np.float32, compression="gzip")
-
-            P = max(1, int(cfg.param_batch))
-            Rc = max(1, int(cfg.repeat_chunk))
-
-            outer = range(0, N, P)
-            if tqdm:
-                outer = tqdm(outer, desc=f"build stats+Y [{cfg.descriptor}]", total=(N + P - 1) // P)
-
-            for pb in outer:
-                pe = min(N, pb + P)
-                Pb = pe - pb
-
-                sum2d = torch.zeros((Pb, n_pairs, H, W), dtype=torch.float32)
-                sum1d = torch.zeros((Pb, n_pairs, int(cfg.n_radial_bins)), dtype=torch.float32)
-                sumsq1d = torch.zeros_like(sum1d)
-                sumph = torch.zeros((Pb, q), dtype=torch.float32)
-                sumsqph = torch.zeros_like(sumph)
-
-                for rb in range(0, R, Rc):
-                    re = min(R, rb + Rc)
-                    Rb = re - rb
-
-                    spins_np = np.array(spins_dset[pb:pe, rb:re, :, :], dtype=np.int8, copy=False)  # (Pb,Rb,H,W)
-                    spins_t = torch.as_tensor(spins_np, device=device)  # int8
-                    spins_t = spins_t.reshape(Pb * Rb, 1, H, W)
-
-                    corr2d = compute_correlations_2d(spins_t, q=q)  # (Pb*Rb,n_pairs,H,W)
-                    rad = compute_radial_average(corr2d, n_bins=int(cfg.n_radial_bins))  # (Pb*Rb,n_pairs,n_bins)
-                    ph = compute_phase_fractions(spins_t, q=q)  # (Pb*Rb,q)
-
-                    corr2d = corr2d.reshape(Pb, Rb, n_pairs, H, W)
-                    rad = rad.reshape(Pb, Rb, n_pairs, int(cfg.n_radial_bins))
-                    ph = ph.reshape(Pb, Rb, q)
-
-                    sum2d += corr2d.sum(dim=1).detach().cpu()
-
-                    rad_cpu = rad.detach().cpu()
-                    sum1d += rad_cpu.sum(dim=1)
-                    sumsq1d += (rad_cpu * rad_cpu).sum(dim=1)
-
-                    ph_cpu = ph.detach().cpu()
-                    sumph += ph_cpu.sum(dim=1)
-                    sumsqph += (ph_cpu * ph_cpu).sum(dim=1)
-
-                    del spins_t, corr2d, rad, ph
-                    if device.type == "cuda":
-                        torch.cuda.empty_cache()
-
-                c = float(R)
-
-                mean2d = sum2d / c
-                mean1d = sum1d / c
-                var1d = (sumsq1d / c) - mean1d * mean1d
-                std1d = torch.sqrt(torch.clamp(var1d, min=0.0))
-
-                meanph = sumph / c
-                varph = (sumsqph / c) - meanph * meanph
-                stdph = torch.sqrt(torch.clamp(varph, min=0.0))
-
-                d_corr2d[pb:pe, :, :, :] = mean2d.numpy().astype(np.float32, copy=False)
-                d_rad_m[pb:pe, :, :] = mean1d.numpy().astype(np.float32, copy=False)
-                d_rad_s[pb:pe, :, :] = std1d.numpy().astype(np.float32, copy=False)
-
-                d_ph_m[pb:pe, :] = meanph.numpy().astype(np.float32, copy=False)
-                d_ph_s[pb:pe, :] = stdph.numpy().astype(np.float32, copy=False)
-
-                # Build Y from ensemble means
-                if cfg.descriptor == "radial1d":
-                    feat = mean1d.reshape(Pb, -1).numpy().astype(np.float32, copy=False)
-                else:
-                    feat = mean2d.reshape(Pb, -1).numpy().astype(np.float32, copy=False)
-
-                if cfg.prepend_phase_fractions_to_Y:
-                    yblk = np.concatenate([meanph.numpy().astype(np.float32, copy=False), feat], axis=1)
-                else:
-                    yblk = feat
-
-                Y[pb:pe, :] = yblk
-                dY[pb:pe, :] = yblk
+        gy = fout.create_group("Y")
+        gy.attrs["descriptor"] = cfg.descriptor
+        gy.attrs["prepend_phase_fractions_to_Y"] = int(cfg.prepend_phase_fractions_to_Y)
+        gy.create_dataset("Y_mean_descriptor", data=Y, compression="gzip")
 
     meta = dict(
         created_utc=created_utc,
@@ -777,20 +684,16 @@ def main() -> None:
 
     ap.add_argument("--descriptor", type=str, default=Config.descriptor, choices=["radial1d", "corr2d"])
     ap.add_argument("--n_radial_bins", type=int, default=Config.n_radial_bins)
+    ap.add_argument("--whiten_eps", type=float, default=Config.whiten_eps)
 
     ap.add_argument("--prepend_phase_fractions_to_Y", action="store_true")
     ap.add_argument("--no-prepend_phase_fractions_to_Y", dest="prepend_phase_fractions_to_Y", action="store_false")
-    ap.set_defaults(prepend_phase_fractions_to_Y=True)
-
-    ap.add_argument("--param_batch", type=int, default=Config.param_batch)
-    ap.add_argument("--repeat_chunk", type=int, default=Config.repeat_chunk)
+    ap.set_defaults(prepend_phase_fractions_to_Y=False)
 
     ap.add_argument("--standardize_X", type=bool, default=True)
     ap.add_argument("--standardize_Y", type=bool, default=True)
 
     ap.add_argument("--kY", type=int, default=Config.kY)
-    ap.add_argument("--knn_chunk", type=int, default=Config.knn_chunk)
-
     ap.add_argument("--use_weights", action="store_true", help="If set, use Gaussian weights in neighborhoods (default False).")
     ap.add_argument("--ridge_y", type=float, default=Config.ridge_y)
     ap.add_argument("--ridge_x", type=float, default=Config.ridge_x)
@@ -808,8 +711,6 @@ def main() -> None:
     ap.add_argument("--hm_clip_lo", type=float, default=Config.hm_clip[0])
     ap.add_argument("--hm_clip_hi", type=float, default=Config.hm_clip[1])
 
-    ap.add_argument("--force_recompute", action="store_true")
-
     args = ap.parse_args()
 
     cfg = Config(
@@ -818,17 +719,15 @@ def main() -> None:
         tag=str(args.tag),
         descriptor=str(args.descriptor),  # type: ignore
         n_radial_bins=int(args.n_radial_bins),
+        whiten_eps=float(args.whiten_eps),
+        batch_size=int(args.batch_size),
         prepend_phase_fractions_to_Y=bool(args.prepend_phase_fractions_to_Y),
-        param_batch=int(args.param_batch),
-        repeat_chunk=int(args.repeat_chunk),
         standardize_X=bool(args.standardize_X),
         standardize_Y=bool(args.standardize_Y),
         kY=int(args.kY),
-        knn_chunk=int(args.knn_chunk),
         use_weights=bool(args.use_weights),
         ridge_y=float(args.ridge_y),
         ridge_x=float(args.ridge_x),
-        batch_size=int(args.batch_size),
         device=str(args.device),
         dpi=int(args.dpi),
         save_scatter=not bool(args.no_scatter),
@@ -837,7 +736,6 @@ def main() -> None:
         hm_bins_frac=int(args.hm_bins_frac),
         hm_sigma_px=float(args.hm_sigma_px),
         hm_clip=(float(args.hm_clip_lo), float(args.hm_clip_hi)),
-        force_recompute=bool(args.force_recompute),
     )
 
     data_root = Path(cfg.potts_data_dir)
@@ -846,14 +744,14 @@ def main() -> None:
     else:
         in_h5 = find_latest_h5_under(data_root)
 
-    # output directories (new style)
+    # output directories
     analysis_root = Path(cfg.potts_analysis_dir)
     session_dir = analysis_root / _run_folder_name_utc() / in_h5.stem
     root_desc = ensure_dir(session_dir / cfg.descriptor)
 
     out_base_stub = None
     with h5py.File(str(in_h5), "r") as fin:
-        q = int(fin.attrs["q"]) if "q" in fin.attrs else 3
+        q = int(fin.attrs.get("q", 3))
         H = int(fin["states/final_spins"].shape[2])
         W = int(fin["states/final_spins"].shape[3])
         out_base_stub = f"{cfg.tag}_q{q}_{H}x{W}"
@@ -861,26 +759,19 @@ def main() -> None:
     out_h5 = session_dir / f"{out_base_stub}.h5"
     out_json = session_dir / f"{out_base_stub}.json"
 
-    cachep = _cache_path(root_desc, cfg)
-
-    # Load cache or compute stats+Y
-    if cachep.exists() and out_h5.exists() and (not cfg.force_recompute):
-        z = np.load(cachep, allow_pickle=False)
-        X = z["X"].astype(np.float32, copy=False)
-        Y = z["Y"].astype(np.float32, copy=False)
-        meta = json.loads(out_json.read_text()) if out_json.exists() else {"note": "stats json missing"}
-    else:
-        X, Y, meta = build_stats_and_Y(
-            in_h5=in_h5,
-            out_h5=out_h5,
-            out_json=out_json,
-            cfg=cfg,
-            root_desc=root_desc,
-        )
-        ensure_dir(cachep.parent)
-        np.savez_compressed(cachep, X=X, Y=Y)
+    # Compute stats and Y (no caching)
+    print(f"[potts_analyze] Input: {in_h5}")
+    print(f"[potts_analyze] Output: {out_h5}")
+    X, Y, meta = build_stats_and_Y(
+        in_h5=in_h5,
+        out_h5=out_h5,
+        out_json=out_json,
+        cfg=cfg,
+        root_desc=root_desc,
+    )
 
     # Injectivity computation
+    print("[potts_analyze] Computing injectivity metrics...")
     use_cuda = torch.cuda.is_available() and str(cfg.device).startswith("cuda")
     device = torch.device(cfg.device if use_cuda else "cpu")
 
@@ -894,9 +785,11 @@ def main() -> None:
     Xt = to_t(X_use, device=device)
     Yt = to_t(Y_use, device=device)
 
-    idxY_t, dY_t = knn_in_y_chunked(Yt, k=int(cfg.kY), chunk=int(cfg.knn_chunk))
+    print(f"[potts_analyze] Finding {cfg.kY} nearest neighbors...")
+    idxY_t, dY_t = knn_in_y(Yt, k=int(cfg.kY))
 
-    metrics = local_explainedcov_metrics_batched_LOO(
+    print("[potts_analyze] Computing local explained covariance metrics...")
+    metrics = local_explainedcov_metrics_LOO(
         X=Xt,
         Y=Yt,
         idxY=idxY_t,
@@ -942,7 +835,8 @@ def main() -> None:
     np.savetxt(csv_path, data, delimiter=",", header=",".join(header_cols), comments="")
     print(f"[potts_analyze] wrote: {csv_path}")
 
-    # Plots (old style)
+    # Plots
+    print("[potts_analyze] Generating plots...")
     temp = X[:, 0].astype(np.float64, copy=False)
     frac = X[:, 1].astype(np.float64, copy=False)
 
@@ -1001,6 +895,7 @@ def main() -> None:
         kY=int(cfg.kY),
         use_weights=bool(cfg.use_weights),
         ridge_y=float(cfg.ridge_y),
+        whiten_eps=float(cfg.whiten_eps),
         stats=dict(
             unexpl_median=float(np.median(metrics["unexplained_frac"])),
             unexpl_q90=float(np.quantile(metrics["unexplained_frac"], 0.90)),
@@ -1011,7 +906,6 @@ def main() -> None:
     inj_meta = dict(
         created_utc=_utc_now_z(),
         config=asdict(cfg),
-        cache_npz=str(cachep),
         files=dict(
             csv=str(csv_path),
             figs=str(figs_dir),
@@ -1022,6 +916,7 @@ def main() -> None:
     meta_path = out_root / "metadata_local_explainedcov_injectivity.json"
     meta_path.write_text(json.dumps(inj_meta, indent=2))
     print(f"[potts_analyze] wrote: {meta_path}")
+    print("[potts_analyze] Done!")
 
 
 if __name__ == "__main__":
