@@ -175,24 +175,26 @@ def main():
         mosaic = tile_3x3(block, pad=int(args.pad))
         ax.imshow(mosaic, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
         ax.set_axis_off()
-        ax.set_title(f"c0 = {c0_vals[k]:.3f}", fontsize=10)
+        # ax.set_title(f"c0 = {c0_vals[k]:.3f}", fontsize=10)
+        # use latex instead
+        ax.set_title(f"$c_0 = {c0_vals[k]:.3f}$", fontsize=16)
 
         # Column labels (beta)
         for j in range(3):
-            ax.text((j + 0.5) / 3.0, 1.02, f"β={beta_vals[j]:.2f}",
-                    transform=ax.transAxes, ha="center", va="bottom", fontsize=8)
+            ax.text((j + 0.5) / 3.0, -0.05, f"$\\beta={beta_vals[j]:.2f}$",
+                    transform=ax.transAxes, ha="center", va="bottom", fontsize=10)
 
         # Row labels (alpha)
         for i in range(3):
-            ax.text(-0.02, 1.0 - (i + 0.5) / 3.0, f"α={alpha_vals[i]:.2f}",
-                    transform=ax.transAxes, ha="right", va="center", fontsize=8)
+            ax.text(-0.02, 1.0 - (i + 0.5) / 3.0, f"$\\alpha={alpha_vals[i]:.2f}$",
+                    transform=ax.transAxes, ha="right", va="center", fontsize=10)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     outpath = outdir / f"sanity_abc0_3x3x3_{ts}.png"
 
-    fig.suptitle(f"CH sanity grid (seed={args.seed}, steps={steps}, grid={g}, L={float(args.L):g})", fontsize=11)
+    # fig.suptitle(f"CH sanity grid (seed={args.seed}, steps={steps}, grid={g}, L={float(args.L):g})", fontsize=11)
     fig.savefig(outpath, dpi=200)
     plt.close(fig)
 
