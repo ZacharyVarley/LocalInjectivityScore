@@ -215,6 +215,7 @@ def compute_descriptors(
     
     # Allocate output arrays
     mean2d = np.zeros((N, n_pairs, H, W), dtype=np.float32)
+    std2d = np.zeros((N, n_pairs, H, W), dtype=np.float32)
     mean1d = np.zeros((N, n_pairs, int(cfg.n_radial_bins)), dtype=np.float32)
     std1d = np.zeros((N, n_pairs, int(cfg.n_radial_bins)), dtype=np.float32)
     meanph = np.zeros((N, q), dtype=np.float32)
@@ -234,6 +235,7 @@ def compute_descriptors(
         repeat_batch = max(1, min(R, max_elements // (batch_n * H * W)))
         
         sum2d = np.zeros((batch_n, n_pairs, H, W), dtype=np.float64)
+        sumsq2d = np.zeros((batch_n, n_pairs, H, W), dtype=np.float64)
         sum1d = np.zeros((batch_n, n_pairs, int(cfg.n_radial_bins)), dtype=np.float64)
         sumsq1d = np.zeros((batch_n, n_pairs, int(cfg.n_radial_bins)), dtype=np.float64)
         sumph = np.zeros((batch_n, q), dtype=np.float64)
@@ -263,6 +265,7 @@ def compute_descriptors(
             sumsq1d += (rad_batch ** 2).sum(dim=1).cpu().numpy()
             sumph += ph_batch.sum(dim=1).cpu().numpy()
             sumsqph += (ph_batch ** 2).sum(dim=1).cpu().numpy()
+            sumsq2d += (corr2d_batch ** 2).sum(dim=1).cpu().numpy()
             
             # Clean up GPU memory
             del spins_batch, corr2d_batch, rad_batch, ph_batch
@@ -271,6 +274,8 @@ def compute_descriptors(
         
         # Compute statistics from accumulated sums
         mean2d[i:i_end] = (sum2d / R).astype(np.float32)
+        var2d = (sumsq2d / R) - (sum2d / R) ** 2
+        std2d[i:i_end] = np.sqrt(np.maximum(var2d, 0.0)).astype(np.float32)
         mean1d[i:i_end] = (sum1d / R).astype(np.float32)
         var1d = (sumsq1d / R) - (sum1d / R) ** 2
         std1d[i:i_end] = np.sqrt(np.maximum(var1d, 0.0)).astype(np.float32)
@@ -305,6 +310,7 @@ def compute_descriptors(
 
         gc = fout.create_group("correlations")
         gc.create_dataset("correlations_2d_mean", data=mean2d)
+        gc.create_dataset("correlations_2d_std", data=std2d)
         gc.create_dataset("correlations_radial_mean", data=mean1d)
         gc.create_dataset("correlations_radial_std", data=std1d)
 
@@ -322,6 +328,7 @@ def compute_descriptors(
             correlations_2d_mean=[int(N), int(n_pairs), int(H), int(W)],
             correlations_radial_mean=[int(N), int(n_pairs), int(cfg.n_radial_bins)],
             correlations_radial_std=[int(N), int(n_pairs), int(cfg.n_radial_bins)],
+            correlations_2d_std=[int(N), int(n_pairs), int(H), int(W)],
             final_fraction_mean=[int(N), int(q)],
             final_fraction_std=[int(N), int(q)],
         ),
