@@ -221,3 +221,6 @@ __marimo__/
 *.h5
 *.npy
 *.npz
+
+# plotly
+*.html

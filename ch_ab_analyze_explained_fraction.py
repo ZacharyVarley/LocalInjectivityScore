@@ -212,6 +212,9 @@ def make_corr2d_weight(H: int, W: int, power: float, device: torch.device) -> to
     r = torch.sqrt((x - float(cx)) ** 2 + (y - float(cy)) ** 2)
     r = torch.clamp(r, min=1.0)
     w = 1.0 / (r ** float(power))
+    # if the power is 0 then we return ones
+    if float(power) == 0.0:
+        w = torch.ones_like(r, dtype=torch.float32)
     return w.to(torch.float32)
 
 

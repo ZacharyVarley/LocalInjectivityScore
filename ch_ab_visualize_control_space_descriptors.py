@@ -8,26 +8,28 @@ Runs 27 simulations on a 3x3x3 grid over:
   c0    in [c0_min,    c0_max]
 
 Visualization:
-  - One figure with 3 subplots (one per c0 slice)
-  - Each subplot is a 3x3 grid of 2D correlation surface heatmaps (rows=alpha, cols=beta)
+  - Top row: microstructures (single deterministic run)
+  - Middle row: autocorrelation surfaces (single run)
+  - Bottom row: averaged autocorrelation surfaces from 100 repeated runs per configuration
+  - Each row has 3 subplots (one per c0 slice)
+  - Each subplot is a 3x3 grid of heatmaps (rows=alpha, cols=beta)
   - Spatial-lag autocorrelation computed via FFT, publication-ready styling
 
-Uses fixed seed:
-  - One deterministic noise field added to each simulation
-  - c initial = c0 + noise_amp * noise_field, clamped
+Uses fixed seed for reproducibility:
+  - Initial deterministic noise field for single-run microstructure
+  - 100 repeats per configuration with different random noise seeds (seed + repeat_idx + 1)
+  - c initial = c0 + noise_amp * noise_field, clamped to [0,1]
 
-Saves to: ch_ab_figures/ (default).
+Saves to: ch_ab_figures/ (default) with consistent filenames (no timestamps).
 """
 
 import argparse
 import math
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
 
 
 @torch.no_grad()
@@ -88,19 +90,25 @@ def autocorr2d_fft(x: torch.Tensor) -> torch.Tensor:
     return corr.to(torch.float32)
 
 
-def tile_3x3(block: np.ndarray, pad: int = 2) -> np.ndarray:
+def tile_3x3(block: np.ndarray, pad: int = 4) -> np.ndarray:
     """
     block: (3,3,H,W)
     returns: (3H+2pad, 3W+2pad)
     """
     H, W = block.shape[2], block.shape[3]
-    canvas = np.zeros((3 * H + 2 * pad, 3 * W + 2 * pad), dtype=np.float32)
+    pad_col = np.ones((H, pad), dtype=np.float32)
+    pad_row = np.ones((pad, 3 * W + 2 * pad), dtype=np.float32)
+
+    rows = []
     for i in range(3):
-        for j in range(3):
-            y0 = i * (H + pad)
-            x0 = j * (W + pad)
-            canvas[y0:y0 + H, x0:x0 + W] = block[i, j]
-    return canvas
+        row = np.concatenate(
+            [block[i, 0], pad_col, block[i, 1], pad_col, block[i, 2]],
+            axis=1,
+        )
+        rows.append(row)
+
+    mosaic = np.concatenate([rows[0], pad_row, rows[1], pad_row, rows[2]], axis=0)
+    return mosaic
 
 
 def main():
@@ -198,15 +206,71 @@ def main():
     H_corr, W_corr = corr2d_cpu.shape[-2:]
     corr2d_reshaped = corr2d_cpu.reshape(3, 3, 3, H_corr, W_corr)
 
-    # Global normalization for consistent colormap across all subplots
+    # Normalize autocorrelation to [0, 1] for full intensity range display
+    corr_min = float(corr2d_cpu.min())
+    corr_max = float(corr2d_cpu.max())
+    corr2d_normalized = (corr2d_cpu - corr_min) / (corr_max - corr_min)
+    corr2d_reshaped_normalized = corr2d_normalized.reshape(3, 3, 3, H_corr, W_corr)
+    
+    print(f"[INFO] Autocorrelation range before normalization: min={corr_min:.6f}, max={corr_max:.6f}")
+    
+    # Global normalization for consistent colormap across all subplots (legacy)
     corr_vmin = float(np.percentile(corr2d_cpu, 1))
     corr_vmax = float(np.percentile(corr2d_cpu, 99))
+    corr_abs = float(np.max(np.abs(corr2d_cpu)))
+    corr_vmin_sym = -corr_abs
+    corr_vmax_sym = corr_abs
+
+    # Compute averaged autocorrelations from 100 repeated runs per configuration
+    print("[CORR2D_AVG] running 100 repeated simulations per configuration for averaged autocorrelations...")
+    n_repeats = 100
+    
+    # For each repeat, run all 27 configurations with different noise
+    corr2d_all_repeats = []
+    
+    for repeat_idx in range(n_repeats):
+        # Different random seed for each repeat
+        gen_repeat = torch.Generator(device=device).manual_seed(int(args.seed) + repeat_idx + 1)
+        noise_repeat = torch.randn((B, g, g), device=device, generator=gen_repeat, dtype=torch.float32)
+        
+        c0b = c0_all.view(B, 1, 1)
+        c_repeat = (c0b + noise_repeat * float(args.noise_amp)).clamp_(0.0, 1.0)
+        c_hat_repeat = torch.fft.fftn(c_repeat, dim=(-2, -1))
+        
+        for t in range(steps):
+            c_repeat, c_hat_repeat = ch_step(c_repeat, c_hat_repeat, K2, dealias, W, kappa, M, dt)
+        
+        # Compute autocorrelation for this repeat
+        corr2d_repeat = autocorr2d_fft(c_repeat)  # (27, g, g)
+        
+        # Downsample if requested
+        if ds > 1:
+            corr2d_repeat = corr2d_repeat[:, ::ds, ::ds]
+        
+        corr2d_all_repeats.append(corr2d_repeat)
+        
+        if (repeat_idx + 1) % 10 == 0 or (repeat_idx + 1) == n_repeats:
+            print(f"  completed {repeat_idx + 1}/{n_repeats} repeats")
+    
+    # Stack all repeats and average: (100, 27, H_corr, W_corr) -> (27, H_corr, W_corr)
+    corr2d_stacked = torch.stack(corr2d_all_repeats, dim=0)  # (100, 27, H_corr, W_corr)
+    corr2d_avg = corr2d_stacked.mean(dim=0)  # (27, H_corr, W_corr)
+    
+    corr2d_avg_all = corr2d_avg.detach().cpu().numpy().astype(np.float32)
+    corr2d_avg_reshaped = corr2d_avg_all.reshape(3, 3, 3, H_corr, W_corr)
+    
+    # Normalize averaged autocorrelations
+    corr_avg_min = float(corr2d_avg_all.min())
+    corr_avg_max = float(corr2d_avg_all.max())
+    corr2d_avg_normalized = (corr2d_avg_all - corr_avg_min) / (corr_avg_max - corr_avg_min)
+    corr2d_avg_reshaped_normalized = corr2d_avg_normalized.reshape(3, 3, 3, H_corr, W_corr)
+    
+    print(f"[OK] Averaged autocorrelation range: min={corr_avg_min:.6f}, max={corr_avg_max:.6f}")
 
     alpha_vals = alphas.detach().cpu().numpy()
     beta_vals  = betas.detach().cpu().numpy()
     c0_vals    = c0s.detach().cpu().numpy()
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -230,7 +294,7 @@ def main():
             ax.text(-0.02, 1.0 - (i + 0.5) / 3.0, f"$\\alpha={alpha_vals[i]:.2f}$",
                     transform=ax.transAxes, ha="right", va="center", fontsize=10)
 
-    outpath_micro = outdir / f"microstructures_3x3x3_{ts}.png"
+    outpath_micro = outdir / "microstructures_3x3x3.png"
     fig_micro.savefig(outpath_micro, dpi=300, bbox_inches="tight")
     plt.close(fig_micro)
     print(f"[OK] saved microstructures: {outpath_micro}")
@@ -260,66 +324,81 @@ def main():
     # Add shared colorbar
     fig_corr.colorbar(im, ax=axes_corr, label="Spatial-lag autocorrelation", fraction=0.046, pad=0.04)
 
-    outpath_corr = outdir / f"corr2d_descriptors_3x3x3_{ts}.png"
+    outpath_corr = outdir / "corr2d_descriptors_3x3x3.png"
     fig_corr.savefig(outpath_corr, dpi=300, bbox_inches="tight")
     plt.close(fig_corr)
     print(f"[OK] saved corr2d descriptors: {outpath_corr}")
 
-    # --- SAVE STACKED COMBINED FIGURE ---
-    fig_stacked = plt.figure(figsize=(16, 9), constrained_layout=False)
-    gs = GridSpec(2, 3, figure=fig_stacked, hspace=0.3, wspace=0.2, 
-                  left=0.08, right=0.92, top=0.95, bottom=0.08)
+    # --- SAVE STACKED COMBINED FIGURE (with optional averaged autocorrelations) ---
+    n_rows = 3 if corr2d_avg_all is not None else 2
+    fig_stacked, axes_stacked = plt.subplots(n_rows, 3, figsize=(16, 5 * n_rows), constrained_layout=False)
+    fig_stacked.subplots_adjust(hspace=0.05, wspace=0.1, left=0.08, right=0.92, top=0.95, bottom=0.08)
 
     for k in range(3):
         # Top row: microstructures
-        ax_micro = fig_stacked.add_subplot(gs[0, k])
+        ax_micro = axes_stacked[0, k]
         block_micro = imgs[k]
-        mosaic_micro = tile_3x3(block_micro, pad=2)
+        mosaic_micro = tile_3x3(block_micro, pad=4)
         ax_micro.imshow(mosaic_micro, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
         ax_micro.set_axis_off()
         if k == 0:
-            ax_micro.text(-0.15, 0.5, "Microstructure", transform=ax_micro.transAxes, 
-                         fontsize=14, fontweight="bold", rotation=90, va="center", ha="right")
-        ax_micro.set_title(f"$c_0 = {c0_vals[k]:.3f}$", fontsize=13, pad=5)
+            ax_micro.text(-0.25, 0.5, "Microstructure", transform=ax_micro.transAxes, 
+                         fontsize=18, fontweight="bold", rotation=90, va="center", ha="right")
+        ax_micro.set_title(f"$c_0 = {c0_vals[k]:.3f}$", fontsize=16, pad=10)
 
-        # Column labels (beta)
-        for j in range(3):
-            ax_micro.text((j + 0.5) / 3.0, -0.05, f"$\\beta={beta_vals[j]:.2f}$",
-                    transform=ax_micro.transAxes, ha="center", va="top", fontsize=9)
+        # Only add labels on leftmost column (k=0)
+        if k == 0:
+            # Row labels (alpha) - only on left
+            for i in range(3):
+                ax_micro.text(-0.02, 1.0 - (i + 0.5) / 3.0, f"$\\alpha={alpha_vals[i]:.2f}$",
+                        transform=ax_micro.transAxes, ha="right", va="center", fontsize=16, rotation=45)
 
-        # Row labels (alpha)
-        for i in range(3):
-            ax_micro.text(-0.02, 1.0 - (i + 0.5) / 3.0, f"$\\alpha={alpha_vals[i]:.2f}$",
-                    transform=ax_micro.transAxes, ha="right", va="center", fontsize=9)
-
-        # Bottom row: corr2d descriptors
-        ax_corr = fig_stacked.add_subplot(gs[1, k])
-        block_corr = corr2d_reshaped[k]
-        mosaic_corr = tile_3x3(block_corr, pad=2)
-        im_corr = ax_corr.imshow(mosaic_corr, cmap="RdYlBu_r", vmin=corr_vmin, vmax=corr_vmax, interpolation="bilinear")
+        # Middle row: corr2d descriptors (single run)
+        ax_corr = axes_stacked[1, k]
+        block_corr = corr2d_reshaped_normalized[k]
+        mosaic_corr = tile_3x3(block_corr, pad=4)
+        ax_corr.imshow(mosaic_corr, cmap="gray", vmin=0.0, vmax=1.0, interpolation="bilinear")
         ax_corr.set_axis_off()
         if k == 0:
-            ax_corr.text(-0.15, 0.5, "Autocorrelation", transform=ax_corr.transAxes, 
-                        fontsize=14, fontweight="bold", rotation=90, va="center", ha="right")
+            ax_corr.text(-0.25, 0.5, "Autocorrelation", transform=ax_corr.transAxes, 
+                        fontsize=18, fontweight="bold", rotation=90, va="center", ha="right")
 
-        # Column labels (beta)
-        for j in range(3):
-            ax_corr.text((j + 0.5) / 3.0, -0.05, f"$\\beta={beta_vals[j]:.2f}$",
-                    transform=ax_corr.transAxes, ha="center", va="top", fontsize=9)
+        # Row labels (alpha) - only on left
+        if k == 0:
+            for i in range(3):
+                ax_corr.text(-0.02, 1.0 - (i + 0.5) / 3.0, f"$\\alpha={alpha_vals[i]:.2f}$",
+                        transform=ax_corr.transAxes, ha="right", va="center", fontsize=16, rotation=45)
 
-        # Row labels (alpha)
-        for i in range(3):
-            ax_corr.text(-0.02, 1.0 - (i + 0.5) / 3.0, f"$\\alpha={alpha_vals[i]:.2f}$",
-                    transform=ax_corr.transAxes, ha="right", va="center", fontsize=9)
+        # Bottom row: averaged autocorrelations (if available)
+        if corr2d_avg_all is not None:
+            ax_avg = axes_stacked[2, k]
+            block_avg = corr2d_avg_reshaped_normalized[k]
+            mosaic_avg = tile_3x3(block_avg, pad=4)
+            ax_avg.imshow(mosaic_avg, cmap="gray", vmin=0.0, vmax=1.0, interpolation="bilinear")
+            ax_avg.set_axis_off()
+            if k == 0:
+                ax_avg.text(-0.25, 0.5, "Averaged Autocorrelations", transform=ax_avg.transAxes, 
+                            fontsize=18, fontweight="bold", rotation=90, va="center", ha="right")
 
-    # Add colorbar on the right side
-    cbar_ax = fig_stacked.add_axes([0.94, 0.35, 0.012, 0.3])
-    fig_stacked.colorbar(im_corr, cax=cbar_ax, label="Autocorrelation")
+            # Column labels (beta) - only on bottom row
+            for j in range(3):
+                ax_avg.text((j + 0.5) / 3.0, -0.05, f"$\\beta={beta_vals[j]:.2f}$",
+                        transform=ax_avg.transAxes, ha="center", va="top", fontsize=16, rotation=45)
 
-    outpath_stacked = outdir / f"microstructures_and_corr2d_3x3x3_{ts}.png"
+            # Row labels (alpha) - only on left
+            if k == 0:
+                for i in range(3):
+                    ax_avg.text(-0.02, 1.0 - (i + 0.5) / 3.0, f"$\\alpha={alpha_vals[i]:.2f}$",
+                            transform=ax_avg.transAxes, ha="right", va="center", fontsize=16, rotation=45)
+
+    outpath_stacked = outdir / "ch_control_space.png"
     fig_stacked.savefig(outpath_stacked, dpi=300, bbox_inches="tight")
+    # also save pdf for this one
+    outpath_stacked_pdf = outdir / "ch_control_space.pdf"
+    fig_stacked.savefig(outpath_stacked_pdf, dpi=300, bbox_inches="tight")
     plt.close(fig_stacked)
     print(f"[OK] saved stacked combined figure: {outpath_stacked}")
+    print(f"[OK] saved stacked combined figure: {outpath_stacked_pdf}")
 
 
 if __name__ == "__main__":
