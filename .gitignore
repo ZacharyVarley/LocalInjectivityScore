@@ -224,3 +224,7 @@ __marimo__/
 
 # plotly
 *.html
+
+# MNIST
+*.gz
+*ubyte
