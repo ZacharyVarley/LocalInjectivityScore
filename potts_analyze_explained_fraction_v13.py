@@ -43,6 +43,7 @@ DescKind = Literal["radial1d", "corr2d"]
 
 # ----------------------------- time / run discovery -----------------------------
 
+
 def _utc_now_z() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -66,6 +67,7 @@ def ensure_dir(p: Path) -> Path:
 
 # ----------------------------- config -----------------------------
 
+
 @dataclass(frozen=True)
 class Config:
     potts_data_dir: str = "potts_data"
@@ -85,7 +87,7 @@ class Config:
     pca_batch_size: int = 8
     pca_eta: float = 0.1
     pca_dtype: str = "float32"
-    pca_device: str = "cuda" 
+    pca_device: str = "cuda"
     pca_seed: int = 0
 
     # Injectivity metric knobs
@@ -122,9 +124,18 @@ class Config:
 
 # ----------------------------- plotting helpers -----------------------------
 
-def scatter_tf(temp: np.ndarray, frac: np.ndarray, vals: np.ndarray,
-               title: str, outpath_base: Path, dpi: int = 250, cmap: str = "viridis",
-               vmin=None, vmax=None) -> None:
+
+def scatter_tf(
+    temp: np.ndarray,
+    frac: np.ndarray,
+    vals: np.ndarray,
+    title: str,
+    outpath_base: Path,
+    dpi: int = 250,
+    cmap: str = "viridis",
+    vmin=None,
+    vmax=None,
+) -> None:
     plt.figure(figsize=(5.2, 4.2), dpi=dpi)
     sc = plt.scatter(temp, frac, c=vals, s=8, cmap=cmap, vmin=vmin, vmax=vmax)
     plt.xlabel("temperature")
@@ -155,7 +166,9 @@ def _pad_reflect(arr: np.ndarray, pad: int, axis: int) -> np.ndarray:
 def _conv1d_reflect(arr: np.ndarray, k: np.ndarray, axis: int) -> np.ndarray:
     pad = k.size // 2
     x = _pad_reflect(arr, pad, axis)
-    return np.apply_along_axis(lambda m: np.convolve(m, k, mode="valid"), axis=axis, arr=x)
+    return np.apply_along_axis(
+        lambda m: np.convolve(m, k, mode="valid"), axis=axis, arr=x
+    )
 
 
 def _smooth_nan(img: np.ndarray, sigma_px: float) -> np.ndarray:
@@ -174,22 +187,24 @@ def _smooth_nan(img: np.ndarray, sigma_px: float) -> np.ndarray:
     return out
 
 
-def heatmap_binned_tf(temp: np.ndarray,
-                      frac: np.ndarray,
-                      Z: np.ndarray,
-                      title: str,
-                      outbase: Path,
-                      bins_t: int = 60,
-                      bins_f: int = 60,
-                      sigma_px: float = 1.0,
-                      clip=(1, 99),
-                      vmin=None,
-                      vmax=None,
-                      cmap="viridis",
-                      xlabel: str = "temperature",
-                      ylabel: str = "fraction_initial",
-                      overlay_lines: Optional[List[Tuple[np.ndarray, np.ndarray, Dict[str, Any]]]] = None,
-                      dpi: int = 250) -> None:
+def heatmap_binned_tf(
+    temp: np.ndarray,
+    frac: np.ndarray,
+    Z: np.ndarray,
+    title: str,
+    outbase: Path,
+    bins_t: int = 60,
+    bins_f: int = 60,
+    sigma_px: float = 1.0,
+    clip=(1, 99),
+    vmin=None,
+    vmax=None,
+    cmap="viridis",
+    xlabel: str = "temperature",
+    ylabel: str = "fraction_initial",
+    overlay_lines: Optional[List[Tuple[np.ndarray, np.ndarray, Dict[str, Any]]]] = None,
+    dpi: int = 250,
+) -> None:
     temp = temp.astype(np.float64)
     frac = frac.astype(np.float64)
     Z = Z.astype(np.float64)
@@ -197,13 +212,12 @@ def heatmap_binned_tf(temp: np.ndarray,
     tmin, tmax = float(np.min(temp)), float(np.max(temp))
     fmin, fmax = float(np.min(frac)), float(np.max(frac))
 
-    sum_w, tx, fx = np.histogram2d(temp, frac,
-                                  bins=[bins_t, bins_f],
-                                  range=[[tmin, tmax], [fmin, fmax]],
-                                  weights=Z)
-    cnt, _, _ = np.histogram2d(temp, frac,
-                              bins=[tx, fx],
-                              range=[[tmin, tmax], [fmin, fmax]])
+    sum_w, tx, fx = np.histogram2d(
+        temp, frac, bins=[bins_t, bins_f], range=[[tmin, tmax], [fmin, fmax]], weights=Z
+    )
+    cnt, _, _ = np.histogram2d(
+        temp, frac, bins=[tx, fx], range=[[tmin, tmax], [fmin, fmax]]
+    )
 
     with np.errstate(invalid="ignore", divide="ignore"):
         img = sum_w / cnt
@@ -217,32 +231,69 @@ def heatmap_binned_tf(temp: np.ndarray,
 
     if vmin is None or vmax is None:
         if clip is not None:
-            vmin, vmax = np.nanpercentile(img_s, clip[0]), np.nanpercentile(img_s, clip[1])
+            vmin, vmax = np.nanpercentile(img_s, clip[0]), np.nanpercentile(
+                img_s, clip[1]
+            )
         else:
             vmin = vmax = None
 
     fig, axp = plt.subplots(figsize=(5.6, 4.8), dpi=dpi)
-    im = axp.imshow(img_s.T,
-                    origin="lower",
-                    extent=[tx[0], tx[-1], fx[0], fx[-1]],
-                    aspect="auto",
-                    cmap=cmap,
-                    interpolation="bilinear",
-                    vmin=vmin,
-                    vmax=vmax)
+    im = axp.imshow(
+        img_s.T,
+        origin="lower",
+        extent=[tx[0], tx[-1], fx[0], fx[-1]],
+        aspect="auto",
+        cmap=cmap,
+        interpolation="bilinear",
+        vmin=vmin,
+        vmax=vmax,
+    )
     fig.colorbar(im, ax=axp, pad=0.02, fraction=0.05)
     axp.set_xlabel(xlabel)
     axp.set_ylabel(ylabel)
     if overlay_lines is not None:
         for xline, yline, kw in overlay_lines:
             axp.plot(np.asarray(xline), np.asarray(yline), **kw)
-        # Add labels for control lines
-        # "A" at the left of the horizontal line (T_line at f0=0.2)
-        axp.text(0.5, 0.2, "A", fontsize=14, fontweight="bold", 
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", linewidth=1.5))
-        # "B" at the top of the vertical line (f0_sweep at T=0.6)
-        axp.text(0.5, 0.8, "B", fontsize=14, fontweight="bold",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", linewidth=1.5))
+        # Add labels for control lines (A=high f0, B=mid, C=low f0)
+        axp.text(
+            0.5,
+            0.8,
+            "A",
+            fontsize=14,
+            fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="white",
+                edgecolor="black",
+                linewidth=1.5,
+            ),
+        )
+        axp.text(
+            0.5,
+            0.5,
+            "B",
+            fontsize=14,
+            fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="white",
+                edgecolor="black",
+                linewidth=1.5,
+            ),
+        )
+        axp.text(
+            0.5,
+            0.2,
+            "C",
+            fontsize=14,
+            fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="white",
+                edgecolor="black",
+                linewidth=1.5,
+            ),
+        )
     axp.set_title(title)
     fig.tight_layout()
     fig.savefig(str(outbase) + ".png", bbox_inches="tight")
@@ -313,19 +364,30 @@ def plot_pca_top_components_corr2d(
 
     for i in range(k):
         comp = Qcpu[:, i].numpy()
-        feat = comp[feat_start:feat_start + feat_dim]
+        feat = comp[feat_start : feat_start + feat_dim]
         feat = feat.reshape(P, H, W)
         vmax = float(np.max(np.abs(feat))) if feat.size > 0 else 1.0
         vmin = -vmax
 
         for p in range(P):
             ax = axes[i, p]
-            ax.imshow(feat[p], cmap="coolwarm", vmin=vmin, vmax=vmax, interpolation="bilinear")
+            ax.imshow(
+                feat[p], cmap="coolwarm", vmin=vmin, vmax=vmax, interpolation="bilinear"
+            )
             ax.set_axis_off()
             if i == 0:
                 ax.set_title(f"pair {p}", fontsize=10)
-        axes[i, 0].text(-0.15, 0.5, f"PC{i+1}", transform=axes[i, 0].transAxes,
-                        rotation=90, va="center", ha="center", fontsize=11, fontweight="bold")
+        axes[i, 0].text(
+            -0.15,
+            0.5,
+            f"PC{i+1}",
+            transform=axes[i, 0].transAxes,
+            rotation=90,
+            va="center",
+            ha="center",
+            fontsize=11,
+            fontweight="bold",
+        )
 
     fig.suptitle("Top PCA components (corr2d)", fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -365,13 +427,12 @@ def heatmap_explained_frac_with_pca3d(
     tmin, tmax = float(np.min(temp)), float(np.max(temp))
     fmin, fmax = float(np.min(frac)), float(np.max(frac))
 
-    sum_w, tx, fx = np.histogram2d(temp, frac,
-                                  bins=[bins_t, bins_f],
-                                  range=[[tmin, tmax], [fmin, fmax]],
-                                  weights=Z)
-    cnt, _, _ = np.histogram2d(temp, frac,
-                              bins=[tx, fx],
-                              range=[[tmin, tmax], [fmin, fmax]])
+    sum_w, tx, fx = np.histogram2d(
+        temp, frac, bins=[bins_t, bins_f], range=[[tmin, tmax], [fmin, fmax]], weights=Z
+    )
+    cnt, _, _ = np.histogram2d(
+        temp, frac, bins=[tx, fx], range=[[tmin, tmax], [fmin, fmax]]
+    )
 
     with np.errstate(invalid="ignore", divide="ignore"):
         img = sum_w / cnt
@@ -385,7 +446,9 @@ def heatmap_explained_frac_with_pca3d(
 
     if vmin is None or vmax is None:
         if clip is not None:
-            vmin, vmax = np.nanpercentile(img_s, clip[0]), np.nanpercentile(img_s, clip[1])
+            vmin, vmax = np.nanpercentile(img_s, clip[0]), np.nanpercentile(
+                img_s, clip[1]
+            )
         else:
             vmin = vmax = None
 
@@ -395,14 +458,16 @@ def heatmap_explained_frac_with_pca3d(
 
     # Left: heatmap
     ax_hm = fig.add_subplot(gs[0, 0])
-    im = ax_hm.imshow(img_s.T,
-                      origin="lower",
-                      extent=[tx[0], tx[-1], fx[0], fx[-1]],
-                      aspect="auto",
-                      cmap=cmap,
-                      interpolation="bilinear",
-                      vmin=vmin,
-                      vmax=vmax)
+    im = ax_hm.imshow(
+        img_s.T,
+        origin="lower",
+        extent=[tx[0], tx[-1], fx[0], fx[-1]],
+        aspect="auto",
+        cmap=cmap,
+        interpolation="bilinear",
+        vmin=vmin,
+        vmax=vmax,
+    )
     cbar = fig.colorbar(im, ax=ax_hm, pad=0.02, fraction=0.05)
     cbar.set_label("Explained Fraction", fontsize=10)
     ax_hm.set_xlabel(xlabel, fontsize=11)
@@ -410,16 +475,51 @@ def heatmap_explained_frac_with_pca3d(
     if overlay_lines is not None:
         for xline, yline, kw in overlay_lines:
             ax_hm.plot(np.asarray(xline), np.asarray(yline), **kw)
-        # Add labels for control lines
-        ax_hm.text(0.5, 0.2, "A", fontsize=14, fontweight="bold", 
-                  bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", linewidth=1.5))
-        ax_hm.text(0.5, 0.8, "B", fontsize=14, fontweight="bold",
-                  bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", linewidth=1.5))
+        # Add labels for control lines (A=high f0, B=mid, C=low f0)
+        ax_hm.text(
+            0.5,
+            0.8,
+            "A",
+            fontsize=14,
+            fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="white",
+                edgecolor="black",
+                linewidth=1.5,
+            ),
+        )
+        ax_hm.text(
+            0.5,
+            0.5,
+            "B",
+            fontsize=14,
+            fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="white",
+                edgecolor="black",
+                linewidth=1.5,
+            ),
+        )
+        ax_hm.text(
+            0.5,
+            0.2,
+            "C",
+            fontsize=14,
+            fontweight="bold",
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="white",
+                edgecolor="black",
+                linewidth=1.5,
+            ),
+        )
     ax_hm.set_title(title, fontsize=12, fontweight="bold")
 
     # Right: 3D scatter plot
     ax_3d = fig.add_subplot(gs[0, 1], projection="3d")
-    
+
     # Use first 3 PCA components
     if Yp.shape[1] >= 3:
         pc1 = Yp[:, 0]
@@ -439,7 +539,9 @@ def heatmap_explained_frac_with_pca3d(
     pc2 = (pc2 - pc2.mean()) / (pc2.std() + 1e-8)
     pc3 = (pc3 - pc3.mean()) / (pc3.std() + 1e-8)
 
-    scatter = ax_3d.scatter(pc1, pc2, pc3, c=Z, cmap=cmap, s=20, alpha=0.6, vmin=vmin, vmax=vmax)
+    scatter = ax_3d.scatter(
+        pc1, pc2, pc3, c=Z, cmap=cmap, s=20, alpha=0.6, vmin=vmin, vmax=vmax
+    )
     ax_3d.set_xlabel("PC1", fontsize=10, labelpad=8)
     ax_3d.set_ylabel("PC2", fontsize=10, labelpad=8)
     ax_3d.set_zlabel("PC3", fontsize=10, labelpad=8)
@@ -475,7 +577,7 @@ def heatmap_explained_frac_with_pca3d_azimuth_series(
 ) -> None:
     """
     Generate multiple versions of the heatmap+3D plot with different azimuthal angles.
-    
+
     Parameters:
     -----------
     azimuth_angles : list of int
@@ -483,7 +585,7 @@ def heatmap_explained_frac_with_pca3d_azimuth_series(
     """
     if azimuth_angles is None:
         azimuth_angles = [0, 60, 120, 180, 240, 300]
-    
+
     temp = temp.astype(np.float64)
     frac = frac.astype(np.float64)
     Z = Z.astype(np.float64)
@@ -491,13 +593,12 @@ def heatmap_explained_frac_with_pca3d_azimuth_series(
     tmin, tmax = float(np.min(temp)), float(np.max(temp))
     fmin, fmax = float(np.min(frac)), float(np.max(frac))
 
-    sum_w, tx, fx = np.histogram2d(temp, frac,
-                                  bins=[bins_t, bins_f],
-                                  range=[[tmin, tmax], [fmin, fmax]],
-                                  weights=Z)
-    cnt, _, _ = np.histogram2d(temp, frac,
-                              bins=[tx, fx],
-                              range=[[tmin, tmax], [fmin, fmax]])
+    sum_w, tx, fx = np.histogram2d(
+        temp, frac, bins=[bins_t, bins_f], range=[[tmin, tmax], [fmin, fmax]], weights=Z
+    )
+    cnt, _, _ = np.histogram2d(
+        temp, frac, bins=[tx, fx], range=[[tmin, tmax], [fmin, fmax]]
+    )
 
     with np.errstate(invalid="ignore", divide="ignore"):
         img = sum_w / cnt
@@ -511,7 +612,9 @@ def heatmap_explained_frac_with_pca3d_azimuth_series(
 
     if vmin is None or vmax is None:
         if clip is not None:
-            vmin, vmax = np.nanpercentile(img_s, clip[0]), np.nanpercentile(img_s, clip[1])
+            vmin, vmax = np.nanpercentile(img_s, clip[0]), np.nanpercentile(
+                img_s, clip[1]
+            )
         else:
             vmin = vmax = None
 
@@ -541,14 +644,16 @@ def heatmap_explained_frac_with_pca3d_azimuth_series(
 
         # Left: heatmap
         ax_hm = fig.add_subplot(gs[0, 0])
-        im = ax_hm.imshow(img_s.T,
-                          origin="lower",
-                          extent=[tx[0], tx[-1], fx[0], fx[-1]],
-                          aspect="auto",
-                          cmap=cmap,
-                          interpolation="bilinear",
-                          vmin=vmin,
-                          vmax=vmax)
+        im = ax_hm.imshow(
+            img_s.T,
+            origin="lower",
+            extent=[tx[0], tx[-1], fx[0], fx[-1]],
+            aspect="auto",
+            cmap=cmap,
+            interpolation="bilinear",
+            vmin=vmin,
+            vmax=vmax,
+        )
         cbar = fig.colorbar(im, ax=ax_hm, pad=0.02, fraction=0.05)
         cbar.set_label("Explained Fraction", fontsize=10)
         ax_hm.set_xlabel(xlabel, fontsize=11)
@@ -556,16 +661,53 @@ def heatmap_explained_frac_with_pca3d_azimuth_series(
         if overlay_lines is not None:
             for xline, yline, kw in overlay_lines:
                 ax_hm.plot(np.asarray(xline), np.asarray(yline), **kw)
-            # Add labels for control lines
-            ax_hm.text(0.5, 0.2, "A", fontsize=14, fontweight="bold", 
-                      bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", linewidth=1.5))
-            ax_hm.text(0.5, 0.8, "B", fontsize=14, fontweight="bold",
-                      bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", linewidth=1.5))
+            # Add labels for control lines (A=high f0, B=mid, C=low f0)
+            ax_hm.text(
+                0.5,
+                0.8,
+                "A",
+                fontsize=14,
+                fontweight="bold",
+                bbox=dict(
+                    boxstyle="round,pad=0.3",
+                    facecolor="white",
+                    edgecolor="black",
+                    linewidth=1.5,
+                ),
+            )
+            ax_hm.text(
+                0.5,
+                0.5,
+                "B",
+                fontsize=14,
+                fontweight="bold",
+                bbox=dict(
+                    boxstyle="round,pad=0.3",
+                    facecolor="white",
+                    edgecolor="black",
+                    linewidth=1.5,
+                ),
+            )
+            ax_hm.text(
+                0.5,
+                0.2,
+                "C",
+                fontsize=14,
+                fontweight="bold",
+                bbox=dict(
+                    boxstyle="round,pad=0.3",
+                    facecolor="white",
+                    edgecolor="black",
+                    linewidth=1.5,
+                ),
+            )
         ax_hm.set_title(title, fontsize=12, fontweight="bold")
 
         # Right: 3D scatter plot
         ax_3d = fig.add_subplot(gs[0, 1], projection="3d")
-        scatter = ax_3d.scatter(pc1, pc2, pc3, c=Z, cmap=cmap, s=20, alpha=0.6, vmin=vmin, vmax=vmax)
+        scatter = ax_3d.scatter(
+            pc1, pc2, pc3, c=Z, cmap=cmap, s=20, alpha=0.6, vmin=vmin, vmax=vmax
+        )
         ax_3d.set_xlabel("PC1", fontsize=10, labelpad=8)
         ax_3d.set_ylabel("PC2", fontsize=10, labelpad=8)
         ax_3d.set_zlabel("PC3", fontsize=10, labelpad=8)
@@ -574,7 +716,7 @@ def heatmap_explained_frac_with_pca3d_azimuth_series(
 
         # fig.suptitle(title, fontsize=13, fontweight="bold", y=1.00)
         fig.tight_layout()
-        
+
         # Save with azimuth angle in filename
         outpath = Path(str(outbase) + f"_azim{azim:03d}")
         outpath.parent.mkdir(parents=True, exist_ok=True)
@@ -584,6 +726,7 @@ def heatmap_explained_frac_with_pca3d_azimuth_series(
 
 
 # ----------------------------- numeric helpers -----------------------------
+
 
 def standardize_np(X: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     mu = X.mean(axis=0)
@@ -597,6 +740,7 @@ def to_t(x: np.ndarray, device: torch.device) -> torch.Tensor:
 
 
 # ----------------------------- streaming Y from H5 -----------------------------
+
 
 def _get_desc_meta(desc_h5: Path) -> Dict[str, Any]:
     with h5py.File(str(desc_h5), "r") as f:
@@ -613,7 +757,11 @@ def _get_desc_meta(desc_h5: Path) -> Dict[str, Any]:
         else:
             feat_dim = int(np.prod(mean2d_ds.shape[1:]))
 
-        ph_dim = int(meanph_ds.shape[1]) if len(meanph_ds.shape) == 2 else int(meanph_ds.shape[-1])
+        ph_dim = (
+            int(meanph_ds.shape[1])
+            if len(meanph_ds.shape) == 2
+            else int(meanph_ds.shape[-1])
+        )
         return dict(
             descriptor=descriptor,
             q=q,
@@ -675,6 +823,7 @@ def load_X_and_basic_meta(desc_h5: Path) -> Tuple[np.ndarray, Dict[str, Any]]:
 
 # ----------------------------- Oja PCA (batched, with QR) -----------------------------
 
+
 class OjaPCA(torch.nn.Module):
     """
     Batched Oja update with QR re-orthogonalization.
@@ -726,7 +875,9 @@ class OjaPCA(torch.nn.Module):
 
 def compute_global_mean_Y(desc_h5: Path, cfg: Config, batch_size: int) -> np.ndarray:
     meta = _get_desc_meta(desc_h5)
-    y_dim = int(meta["feat_dim"] + (meta["ph_dim"] if cfg.prepend_phase_fractions_to_Y else 0))
+    y_dim = int(
+        meta["feat_dim"] + (meta["ph_dim"] if cfg.prepend_phase_fractions_to_Y else 0)
+    )
 
     mu = np.zeros((y_dim,), dtype=np.float64)
     n = 0
@@ -755,43 +906,49 @@ def fit_svd_pca(
     """
     meta = _get_desc_meta(desc_h5)
     N = int(meta["N"])
-    y_dim = int(meta["feat_dim"] + (meta["ph_dim"] if cfg.prepend_phase_fractions_to_Y else 0))
-    
+    y_dim = int(
+        meta["feat_dim"] + (meta["ph_dim"] if cfg.prepend_phase_fractions_to_Y else 0)
+    )
+
     print(f"Loading full data matrix ({N} x {y_dim})...")
     # Load full Y matrix
     Y = np.empty((N, y_dim), dtype=np.float32)
     n_batches = int(np.ceil(N / 256))
-    for i0, i1, Yb in tqdm(iter_Y_batches(desc_h5, cfg, batch_size=256),
-                           total=n_batches, desc="Loading Y", unit="batch"):
+    for i0, i1, Yb in tqdm(
+        iter_Y_batches(desc_h5, cfg, batch_size=256),
+        total=n_batches,
+        desc="Loading Y",
+        unit="batch",
+    ):
         Y[i0:i1, :] = Yb
-    
+
     # Center
     print("Centering data...")
     Y = Y - mu[None, :]
-    
+
     # Move to device and compute SVD
     print(f"Computing SVD on {device}...")
     Y_t = torch.as_tensor(Y, device=device, dtype=dtype)
-    
+
     # Compute covariance for PCA: Y^T Y / N
     # For efficiency, compute SVD of Y directly and use singular values
     U, S, Vt = torch.linalg.svd(Y_t, full_matrices=False)
-    
+
     # S contains singular values; eigenvalues of cov are S^2 / N
     # Principal components are rows of Vt (columns of V)
     V = Vt.T  # (y_dim, min(N, y_dim))
-    
+
     # Take first n_components
     k = min(n_components, V.shape[1])
     Q = V[:, :k].contiguous()  # (y_dim, k)
-    
+
     # Compute eigenvalue sums for energy calculation
     eig_vals = (S[:k].double().pow(2)).cpu().numpy()  # variance per component
     total_energy = float((S.double().pow(2).sum()).cpu())
-    
+
     del Y, Y_t, U, S, Vt, V
     torch.cuda.empty_cache() if device.type == "cuda" else None
-    
+
     return Q, eig_vals, total_energy
 
 
@@ -808,7 +965,9 @@ def fit_oja_pca_streaming(
     seed: int,
 ) -> torch.Tensor:
     meta = _get_desc_meta(desc_h5)
-    y_dim = int(meta["feat_dim"] + (meta["ph_dim"] if cfg.prepend_phase_fractions_to_Y else 0))
+    y_dim = int(
+        meta["feat_dim"] + (meta["ph_dim"] if cfg.prepend_phase_fractions_to_Y else 0)
+    )
     N = int(meta["N"])
     n_batches = int(np.ceil(N / batch_size))
 
@@ -824,8 +983,13 @@ def fit_oja_pca_streaming(
     mu_t = torch.as_tensor(mu, device=device, dtype=dtype)
 
     for _ep in tqdm(range(int(epochs)), desc="PCA epochs", unit="epoch"):
-        for _, _, Yb in tqdm(iter_Y_batches(desc_h5, cfg, batch_size=batch_size),
-                              total=n_batches, desc=f"Epoch {_ep+1}/{epochs}", leave=False, unit="batch"):
+        for _, _, Yb in tqdm(
+            iter_Y_batches(desc_h5, cfg, batch_size=batch_size),
+            total=n_batches,
+            desc=f"Epoch {_ep+1}/{epochs}",
+            leave=False,
+            unit="batch",
+        ):
             xb = torch.as_tensor(Yb, device=device, dtype=dtype)
             xb = xb - mu_t
             model(xb)
@@ -851,15 +1015,19 @@ def estimate_pca_energy_streaming(
     meta = _get_desc_meta(desc_h5)
     N = int(meta["N"])
     n_batches = int(np.ceil(N / batch_size))
-    
+
     mu_t = torch.as_tensor(mu, device=device, dtype=dtype)
     Qd = Q.to(device=device, dtype=dtype)
 
     eig_sums = torch.zeros((K,), device="cpu", dtype=torch.float64)
     total_energy = 0.0
 
-    for _, _, Yb in tqdm(iter_Y_batches(desc_h5, cfg, batch_size=batch_size),
-                         total=n_batches, desc="Computing PCA energy", unit="batch"):
+    for _, _, Yb in tqdm(
+        iter_Y_batches(desc_h5, cfg, batch_size=batch_size),
+        total=n_batches,
+        desc="Computing PCA energy",
+        unit="batch",
+    ):
         xb = torch.as_tensor(Yb, device=device, dtype=dtype)
         xb = xb - mu_t
         total_energy += float((xb.double() * xb.double()).sum().cpu())
@@ -897,6 +1065,7 @@ def project_Y_with_Q(
 
 
 # ----------------------------- injectivity core -----------------------------
+
 
 @torch.no_grad()
 def knn_in_y(Y: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -941,7 +1110,9 @@ def local_explainedcov_metrics_LOO(
 
     unexpl_coord_max = torch.empty((N,), device=device, dtype=torch.float32)
     unexpl_coord_0 = torch.empty((N,), device=device, dtype=torch.float32)
-    unexpl_coord_1 = torch.empty((N,), device=device, dtype=torch.float32) if p >= 2 else None
+    unexpl_coord_1 = (
+        torch.empty((N,), device=device, dtype=torch.float32) if p >= 2 else None
+    )
 
     avg_dy = torch.empty((N,), device=device, dtype=torch.float32)
 
@@ -962,10 +1133,13 @@ def local_explainedcov_metrics_LOO(
         centers = torch.arange(i0, i1, device=device, dtype=torch.int64)
         neigh = torch.cat([centers[:, None], idxY[i0:i1]], dim=1)  # (B,k)
 
-        dn = torch.cat([
-            torch.zeros((B, 1), device=device, dtype=torch.float32),
-            dY[i0:i1].to(torch.float32)
-        ], dim=1)
+        dn = torch.cat(
+            [
+                torch.zeros((B, 1), device=device, dtype=torch.float32),
+                dY[i0:i1].to(torch.float32),
+            ],
+            dim=1,
+        )
         avg_dy[i0:i1] = dn[:, 1:].mean(dim=1)
 
         Xn = X[neigh]  # (B,k,p)
@@ -978,7 +1152,7 @@ def local_explainedcov_metrics_LOO(
             w = torch.ones((B, k), device=device, dtype=torch.float32)
 
         w = w / w.sum(dim=1, keepdim=True).clamp_min(1e-18)  # (B,k)
-        sw = torch.sqrt(w).to(torch.float32)                 # (B,k), ||sw||_2 = 1
+        sw = torch.sqrt(w).to(torch.float32)  # (B,k), ||sw||_2 = 1
 
         muX = (w[:, :, None] * Xn).sum(dim=1)
         muY = (w[:, :, None] * Yn).sum(dim=1)
@@ -1010,7 +1184,11 @@ def local_explainedcov_metrics_LOO(
         dof = (eta / (eta + lam_b[:, None])).sum(dim=1)
         dof_norm = (dof / denom_km1).clamp(0.0, 1.0).to(torch.float32)
 
-        loo_uninf = (align > float(loo_uninf_align_thr)) & (gap < float(loo_uninf_gap_thr)) & (dof_norm > float(loo_uninf_dof_thr))
+        loo_uninf = (
+            (align > float(loo_uninf_align_thr))
+            & (gap < float(loo_uninf_gap_thr))
+            & (dof_norm > float(loo_uninf_dof_thr))
+        )
 
         uninf_align[i0:i1] = align
         uninf_gap[i0:i1] = gap
@@ -1069,7 +1247,6 @@ def local_explainedcov_metrics_LOO(
         unexplained_coord0=unexpl_coord_0.detach().cpu().numpy(),
         unexplained_coord_max=unexpl_coord_max.detach().cpu().numpy(),
         avg_dY=avg_dy.detach().cpu().numpy(),
-
         loo_uninformative_flag=uninf_flag.detach().cpu().numpy().astype(np.int32),
         loo_uninformative_align=uninf_align.detach().cpu().numpy(),
         loo_uninformative_gap=uninf_gap.detach().cpu().numpy(),
@@ -1082,16 +1259,30 @@ def local_explainedcov_metrics_LOO(
 
 # ----------------------------- main -----------------------------
 
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Analyze Potts descriptors for injectivity (with global Oja-PCA option)")
+    ap = argparse.ArgumentParser(
+        description="Analyze Potts descriptors for injectivity (with global Oja-PCA option)"
+    )
 
     ap.add_argument("--h5", type=str, default=Config.h5, help="Input descriptor HDF5.")
     ap.add_argument("--potts_analysis_dir", type=str, default=Config.potts_analysis_dir)
-    ap.add_argument("--prepend_phase_fractions_to_Y", type=bool, default=Config.prepend_phase_fractions_to_Y)
+    ap.add_argument(
+        "--prepend_phase_fractions_to_Y",
+        type=bool,
+        default=Config.prepend_phase_fractions_to_Y,
+    )
 
     # Global PCA
-    ap.add_argument("--use_global_pca", type=int, default=1 if Config.use_global_pca else 0)
-    ap.add_argument("--pca_method", type=str, default=Config.pca_method, choices=["auto", "svd", "oja"])
+    ap.add_argument(
+        "--use_global_pca", type=int, default=1 if Config.use_global_pca else 0
+    )
+    ap.add_argument(
+        "--pca_method",
+        type=str,
+        default=Config.pca_method,
+        choices=["auto", "svd", "oja"],
+    )
     ap.add_argument("--pca_svd_max_gb", type=float, default=Config.pca_svd_max_gb)
     ap.add_argument("--pca_energy_frac", type=float, default=Config.pca_energy_frac)
     ap.add_argument("--pca_components_max", type=int, default=Config.pca_components_max)
@@ -1099,7 +1290,12 @@ def main() -> None:
     ap.add_argument("--pca_batch_size", type=int, default=Config.pca_batch_size)
     ap.add_argument("--pca_eta", type=float, default=Config.pca_eta)
     ap.add_argument("--pca_device", type=str, default=Config.pca_device)
-    ap.add_argument("--pca_dtype", type=str, default=Config.pca_dtype, choices=["float32", "float16", "bfloat16"])
+    ap.add_argument(
+        "--pca_dtype",
+        type=str,
+        default=Config.pca_dtype,
+        choices=["float32", "float16", "bfloat16"],
+    )
     ap.add_argument("--pca_seed", type=int, default=Config.pca_seed)
 
     # Injectivity
@@ -1123,7 +1319,9 @@ def main() -> None:
     ap.add_argument("--hm_clip_hi", type=float, default=Config.hm_clip[1])
 
     # LOO-uninformative thresholds
-    ap.add_argument("--loo_uninf_align_thr", type=float, default=Config.loo_uninf_align_thr)
+    ap.add_argument(
+        "--loo_uninf_align_thr", type=float, default=Config.loo_uninf_align_thr
+    )
     ap.add_argument("--loo_uninf_gap_thr", type=float, default=Config.loo_uninf_gap_thr)
     ap.add_argument("--loo_uninf_dof_thr", type=float, default=Config.loo_uninf_dof_thr)
 
@@ -1133,7 +1331,6 @@ def main() -> None:
         potts_analysis_dir=str(args.potts_analysis_dir),
         h5=str(args.h5),
         prepend_phase_fractions_to_Y=bool(args.prepend_phase_fractions_to_Y),
-
         use_global_pca=bool(int(args.use_global_pca)),
         pca_method=str(args.pca_method),
         pca_svd_max_gb=float(args.pca_svd_max_gb),
@@ -1145,7 +1342,6 @@ def main() -> None:
         pca_device=str(args.pca_device),
         pca_dtype=str(args.pca_dtype),
         pca_seed=int(args.pca_seed),
-
         standardize_X=bool(args.standardize_X),
         standardize_Y=bool(args.standardize_Y),
         kY=int(args.kY),
@@ -1154,7 +1350,6 @@ def main() -> None:
         ridge_x=float(args.ridge_x),
         batch_size=int(args.batch_size),
         device=str(args.device),
-
         dpi=int(args.dpi),
         save_scatter=not bool(args.no_scatter),
         save_heatmaps=not bool(args.no_heatmaps),
@@ -1162,7 +1357,6 @@ def main() -> None:
         hm_bins_frac=int(args.hm_bins_frac),
         hm_sigma_px=float(args.hm_sigma_px),
         hm_clip=(float(args.hm_clip_lo), float(args.hm_clip_hi)),
-
         loo_uninf_align_thr=float(args.loo_uninf_align_thr),
         loo_uninf_gap_thr=float(args.loo_uninf_gap_thr),
         loo_uninf_dof_thr=float(args.loo_uninf_dof_thr),
@@ -1185,7 +1379,9 @@ def main() -> None:
     # ------------------ Global PCA (streaming or SVD) ------------------
     pca_info: Dict[str, Any] = dict(enabled=bool(cfg.use_global_pca))
     if cfg.use_global_pca:
-        pca_dtype = dict(float32=torch.float32, float16=torch.float16, bfloat16=torch.bfloat16)[cfg.pca_dtype]
+        pca_dtype = dict(
+            float32=torch.float32, float16=torch.float16, bfloat16=torch.bfloat16
+        )[cfg.pca_dtype]
         pca_device = torch.device(cfg.pca_device)
 
         mu = compute_global_mean_Y(desc_h5, cfg, batch_size=cfg.pca_batch_size)
@@ -1198,8 +1394,10 @@ def main() -> None:
             mem_gb = (N * y_dim * 4) / (1024**3)  # float32 = 4 bytes
             use_svd = (mem_gb <= cfg.pca_svd_max_gb) and pca_device.type == "cuda"
             method = "svd" if use_svd else "oja"
-            print(f"Auto-selected PCA method: {method} (estimated data size: {mem_gb:.2f} GB)")
-        
+            print(
+                f"Auto-selected PCA method: {method} (estimated data size: {mem_gb:.2f} GB)"
+            )
+
         if method == "svd":
             print(f"Using SVD-based PCA...")
             Q, eig_vals, total_energy = fit_svd_pca(
@@ -1255,7 +1453,9 @@ def main() -> None:
 
         m = int(np.searchsorted(cum, float(cfg.pca_energy_frac)) + 1)
         m = max(1, min(m, int(cfg.pca_components_max)))
-        print(f"Selected {m} PCA components to capture {cfg.pca_energy_frac*100:.1f}% energy (achieved {cum[m-1]*100:.2f}%)")
+        print(
+            f"Selected {m} PCA components to capture {cfg.pca_energy_frac*100:.1f}% energy (achieved {cum[m-1]*100:.2f}%)"
+        )
 
         Qm = Q[:, :m].detach().clone()
 
@@ -1269,22 +1469,27 @@ def main() -> None:
             dtype=pca_dtype,
         )
 
-        pca_info.update(dict(
-            energy_target=float(cfg.pca_energy_frac),
-            components_max=int(cfg.pca_components_max),
-            epochs=int(cfg.pca_epochs) if pca_info.get("method") == "oja" else None,
-            batch_size=int(cfg.pca_batch_size),
-            eta=float(cfg.pca_eta) if pca_info.get("method") == "oja" else None,
-            dtype=str(cfg.pca_dtype),
-            device=str(cfg.pca_device),
-            seed=int(cfg.pca_seed) if pca_info.get("method") == "oja" else None,
-            selected_components=int(m),
-            achieved_energy=float(cum[m - 1]) if cum.size >= m else float("nan"),
-        ))
+        pca_info.update(
+            dict(
+                energy_target=float(cfg.pca_energy_frac),
+                components_max=int(cfg.pca_components_max),
+                epochs=int(cfg.pca_epochs) if pca_info.get("method") == "oja" else None,
+                batch_size=int(cfg.pca_batch_size),
+                eta=float(cfg.pca_eta) if pca_info.get("method") == "oja" else None,
+                dtype=str(cfg.pca_dtype),
+                device=str(cfg.pca_device),
+                seed=int(cfg.pca_seed) if pca_info.get("method") == "oja" else None,
+                selected_components=int(m),
+                achieved_energy=float(cum[m - 1]) if cum.size >= m else float("nan"),
+            )
+        )
     else:
         # Fallback: materialize full Y into RAM (same semantics as original)
         metaY = _get_desc_meta(desc_h5)
-        y_dim = int(metaY["feat_dim"] + (metaY["ph_dim"] if cfg.prepend_phase_fractions_to_Y else 0))
+        y_dim = int(
+            metaY["feat_dim"]
+            + (metaY["ph_dim"] if cfg.prepend_phase_fractions_to_Y else 0)
+        )
         Yp = np.empty((N, y_dim), dtype=np.float32)
         for i0, i1, Yb in iter_Y_batches(desc_h5, cfg, batch_size=256):
             Yp[i0:i1, :] = Yb
@@ -1327,10 +1532,14 @@ def main() -> None:
     csv_path = out_root / "potts_local_explainedcov_injectivity.csv"
 
     header_cols = [
-        "temperature", "fraction_initial",
-        "unexplained_frac", "explained_frac",
-        "worst_unexplained_ratio", "worst_retention",
-        "trX", "trR",
+        "temperature",
+        "fraction_initial",
+        "unexplained_frac",
+        "explained_frac",
+        "worst_unexplained_ratio",
+        "worst_retention",
+        "trX",
+        "trR",
         "avg_dY",
         "unexplained_coord0",
         "unexplained_coord_max",
@@ -1343,10 +1552,14 @@ def main() -> None:
         header_cols.append("unexplained_coord1")
 
     cols = [
-        X[:, 0], X[:, 1],
-        metrics["unexplained_frac"], metrics["explained_frac"],
-        metrics["worst_unexplained_ratio"], metrics["worst_retention"],
-        metrics["trX"], metrics["trR"],
+        X[:, 0],
+        X[:, 1],
+        metrics["unexplained_frac"],
+        metrics["explained_frac"],
+        metrics["worst_unexplained_ratio"],
+        metrics["worst_retention"],
+        metrics["trX"],
+        metrics["trR"],
         metrics["avg_dY"],
         metrics["unexplained_coord0"],
         metrics["unexplained_coord_max"],
@@ -1366,124 +1579,306 @@ def main() -> None:
     frac = X[:, 1].astype(np.float64, copy=False)
 
     if cfg.save_scatter:
-        scatter_tf(temp, frac, metrics["unexplained_frac"],
-                   f"{descriptor}: unexplained fraction tr(R)/tr(X) (higher worse)",
-                   figs_dir / "scatter_unexplained_frac", dpi=cfg.dpi, vmin=0.0, vmax=1.0)
-        scatter_tf(temp, frac, metrics["explained_frac"],
-                   f"{descriptor}: explained fraction 1 - tr(R)/tr(X) (higher better)",
-                   figs_dir / "scatter_explained_frac", dpi=cfg.dpi, vmin=0.0, vmax=1.0)
-        scatter_tf(temp, frac, metrics["worst_retention"],
-                   f"{descriptor}: worst retention (directional, ridge-stabilized)",
-                   figs_dir / "scatter_worst_retention", dpi=cfg.dpi, vmin=0.0, vmax=1.0)
-        scatter_tf(temp, frac, np.log10(metrics["trX"] + 1e-30),
-                   f"{descriptor}: log10 local X energy tr(X) (excitation)",
-                   figs_dir / "scatter_log10_trX", dpi=cfg.dpi)
-        scatter_tf(temp, frac, metrics["unexplained_coord_max"],
-                   f"{descriptor}: max coord unexplained (catches single-parameter collapse)",
-                   figs_dir / "scatter_unexplained_coord_max", dpi=cfg.dpi, vmin=0.0, vmax=1.0)
+        scatter_tf(
+            temp,
+            frac,
+            metrics["unexplained_frac"],
+            f"{descriptor}: unexplained fraction tr(R)/tr(X) (higher worse)",
+            figs_dir / "scatter_unexplained_frac",
+            dpi=cfg.dpi,
+            vmin=0.0,
+            vmax=1.0,
+        )
+        scatter_tf(
+            temp,
+            frac,
+            metrics["explained_frac"],
+            f"{descriptor}: explained fraction 1 - tr(R)/tr(X) (higher better)",
+            figs_dir / "scatter_explained_frac",
+            dpi=cfg.dpi,
+            vmin=0.0,
+            vmax=1.0,
+        )
+        scatter_tf(
+            temp,
+            frac,
+            metrics["worst_retention"],
+            f"{descriptor}: worst retention (directional, ridge-stabilized)",
+            figs_dir / "scatter_worst_retention",
+            dpi=cfg.dpi,
+            vmin=0.0,
+            vmax=1.0,
+        )
+        scatter_tf(
+            temp,
+            frac,
+            np.log10(metrics["trX"] + 1e-30),
+            f"{descriptor}: log10 local X energy tr(X) (excitation)",
+            figs_dir / "scatter_log10_trX",
+            dpi=cfg.dpi,
+        )
+        scatter_tf(
+            temp,
+            frac,
+            metrics["unexplained_coord_max"],
+            f"{descriptor}: max coord unexplained (catches single-parameter collapse)",
+            figs_dir / "scatter_unexplained_coord_max",
+            dpi=cfg.dpi,
+            vmin=0.0,
+            vmax=1.0,
+        )
 
         trXv = metrics["trX"]
         exc = trXv >= np.quantile(trXv, 0.25)
         flag_ok = ((metrics["explained_frac"] >= 0.9) & exc).astype(np.float64)
-        scatter_tf(temp, frac, flag_ok,
-                   f"{descriptor}: indicator explained_frac>=0.9 & trX>=Q25",
-                   figs_dir / "scatter_ok_indicator", dpi=cfg.dpi, vmin=0.0, vmax=1.0)
+        scatter_tf(
+            temp,
+            frac,
+            flag_ok,
+            f"{descriptor}: indicator explained_frac>=0.9 & trX>=Q25",
+            figs_dir / "scatter_ok_indicator",
+            dpi=cfg.dpi,
+            vmin=0.0,
+            vmax=1.0,
+        )
 
         # LOO-uninformative
-        scatter_tf(temp, frac, metrics["loo_uninformative_flag"].astype(np.float64),
-                   f"{descriptor}: LOO uninformative flag (1=geometry-saturated)",
-                   figs_dir / "scatter_loo_uninformative_flag", dpi=cfg.dpi, vmin=0.0, vmax=1.0)
-        scatter_tf(temp, frac, metrics["loo_uninformative_dof_norm"],
-                   f"{descriptor}: LOO uninformative dof_norm = dof/(k-1)",
-                   figs_dir / "scatter_loo_uninformative_dof_norm", dpi=cfg.dpi, vmin=0.0, vmax=1.0)
-        scatter_tf(temp, frac, metrics["loo_uninformative_align"],
-                   f"{descriptor}: LOO uninformative align = |v0^T sqrt(w)|",
-                   figs_dir / "scatter_loo_uninformative_align", dpi=cfg.dpi, vmin=0.0, vmax=1.0)
-        scatter_tf(temp, frac, np.log10(metrics["loo_uninformative_gap"] + 1e-30),
-                   f"{descriptor}: log10 gap = log10(eta0/eta1)",
-                   figs_dir / "scatter_log10_loo_uninformative_gap", dpi=cfg.dpi)
+        scatter_tf(
+            temp,
+            frac,
+            metrics["loo_uninformative_flag"].astype(np.float64),
+            f"{descriptor}: LOO uninformative flag (1=geometry-saturated)",
+            figs_dir / "scatter_loo_uninformative_flag",
+            dpi=cfg.dpi,
+            vmin=0.0,
+            vmax=1.0,
+        )
+        scatter_tf(
+            temp,
+            frac,
+            metrics["loo_uninformative_dof_norm"],
+            f"{descriptor}: LOO uninformative dof_norm = dof/(k-1)",
+            figs_dir / "scatter_loo_uninformative_dof_norm",
+            dpi=cfg.dpi,
+            vmin=0.0,
+            vmax=1.0,
+        )
+        scatter_tf(
+            temp,
+            frac,
+            metrics["loo_uninformative_align"],
+            f"{descriptor}: LOO uninformative align = |v0^T sqrt(w)|",
+            figs_dir / "scatter_loo_uninformative_align",
+            dpi=cfg.dpi,
+            vmin=0.0,
+            vmax=1.0,
+        )
+        scatter_tf(
+            temp,
+            frac,
+            np.log10(metrics["loo_uninformative_gap"] + 1e-30),
+            f"{descriptor}: log10 gap = log10(eta0/eta1)",
+            figs_dir / "scatter_log10_loo_uninformative_gap",
+            dpi=cfg.dpi,
+        )
 
     if cfg.save_heatmaps:
-        heatmap_binned_tf(temp, frac, metrics["unexplained_frac"],
-                          f"{descriptor}: heatmap unexplained fraction",
-                          figs_dir / "heatmap_unexplained_frac",
-                          bins_t=cfg.hm_bins_temp, bins_f=cfg.hm_bins_frac,
-                          sigma_px=cfg.hm_sigma_px, clip=cfg.hm_clip, dpi=cfg.dpi)
+        heatmap_binned_tf(
+            temp,
+            frac,
+            metrics["unexplained_frac"],
+            f"{descriptor}: heatmap unexplained fraction",
+            figs_dir / "heatmap_unexplained_frac",
+            bins_t=cfg.hm_bins_temp,
+            bins_f=cfg.hm_bins_frac,
+            sigma_px=cfg.hm_sigma_px,
+            clip=cfg.hm_clip,
+            dpi=cfg.dpi,
+        )
         # Publication: explained fraction heatmap (base)
         pub_title = "Explained Fraction 3-State Potts"
         pub_xlabel = r"$T$"
         pub_ylabel = r"$f_0$"
-        heatmap_binned_tf(temp, frac, metrics["explained_frac"],
-                          pub_title,
-                          figs_dir / "heatmap_explained_frac",
-                          bins_t=cfg.hm_bins_temp, bins_f=cfg.hm_bins_frac,
-                          sigma_px=cfg.hm_sigma_px, clip=cfg.hm_clip,
-                          vmin=0.0, vmax=1.0,
-                          xlabel=pub_xlabel, ylabel=pub_ylabel,
-                          dpi=cfg.dpi)
+        heatmap_binned_tf(
+            temp,
+            frac,
+            metrics["explained_frac"],
+            pub_title,
+            figs_dir / "heatmap_explained_frac",
+            bins_t=cfg.hm_bins_temp,
+            bins_f=cfg.hm_bins_frac,
+            sigma_px=cfg.hm_sigma_px,
+            clip=cfg.hm_clip,
+            vmin=0.0,
+            vmax=1.0,
+            xlabel=pub_xlabel,
+            ylabel=pub_ylabel,
+            dpi=cfg.dpi,
+        )
 
         # Same plot with control-line overlays used in the paper visualization.
         T_line = np.array([0.6, 0.7, 0.8, 0.9, 1.0, 1.1], dtype=np.float64)
         f0_line = np.full_like(T_line, 0.20, dtype=np.float64)
-        f0_sweep = np.array([0.3, 0.4, 0.5, 0.6, 0.7, 0.8], dtype=np.float64)
+        f0_sweep = np.array([0.25, 0.35, 0.45, 0.55, 0.65, 0.75], dtype=np.float64)
         T_const = np.full_like(f0_sweep, 0.60, dtype=np.float64)
+        f0_line_C = np.full_like(T_line, 0.80, dtype=np.float64)
 
         overlays = [
             (T_line, f0_line, dict(color="black", linewidth=3.0, alpha=0.9, zorder=5)),
-            (T_line, f0_line, dict(color="white", linewidth=1.8, alpha=0.95, marker="o",
-                                   markersize=3.0, markerfacecolor="white",
-                                   markeredgecolor="black", markeredgewidth=0.6, zorder=6)),
-            (T_const, f0_sweep, dict(color="black", linewidth=3.0, alpha=0.9, zorder=5)),
-            (T_const, f0_sweep, dict(color="white", linewidth=1.8, alpha=0.95, marker="o",
-                                     markersize=3.0, markerfacecolor="white",
-                                     markeredgecolor="black", markeredgewidth=0.6, zorder=6)),
+            (
+                T_line,
+                f0_line,
+                dict(
+                    color="white",
+                    linewidth=1.8,
+                    alpha=0.95,
+                    marker="o",
+                    markersize=3.0,
+                    markerfacecolor="white",
+                    markeredgecolor="black",
+                    markeredgewidth=0.6,
+                    zorder=6,
+                ),
+            ),
+            (
+                T_const,
+                f0_sweep,
+                dict(color="black", linewidth=3.0, alpha=0.9, zorder=5),
+            ),
+            (
+                T_const,
+                f0_sweep,
+                dict(
+                    color="white",
+                    linewidth=1.8,
+                    alpha=0.95,
+                    marker="o",
+                    markersize=3.0,
+                    markerfacecolor="white",
+                    markeredgecolor="black",
+                    markeredgewidth=0.6,
+                    zorder=6,
+                ),
+            ),
+            (
+                T_line,
+                f0_line_C,
+                dict(color="black", linewidth=3.0, alpha=0.9, zorder=5),
+            ),
+            (
+                T_line,
+                f0_line_C,
+                dict(
+                    color="white",
+                    linewidth=1.8,
+                    alpha=0.95,
+                    marker="o",
+                    markersize=3.0,
+                    markerfacecolor="white",
+                    markeredgecolor="black",
+                    markeredgewidth=0.6,
+                    zorder=6,
+                ),
+            ),
         ]
-        
+
         # Combined heatmap + 3D PCA projection figure
         heatmap_explained_frac_with_pca3d(
-            temp, frac, metrics["explained_frac"], Yp,
+            temp,
+            frac,
+            metrics["explained_frac"],
+            Yp,
             pub_title,
             figs_dir / "heatmap_explained_frac_lines",
-            bins_t=cfg.hm_bins_temp, bins_f=cfg.hm_bins_frac,
-            sigma_px=cfg.hm_sigma_px, clip=cfg.hm_clip,
-            vmin=0.0, vmax=1.0,
-            xlabel=pub_xlabel, ylabel=pub_ylabel,
+            bins_t=cfg.hm_bins_temp,
+            bins_f=cfg.hm_bins_frac,
+            sigma_px=cfg.hm_sigma_px,
+            clip=cfg.hm_clip,
+            vmin=0.0,
+            vmax=1.0,
+            xlabel=pub_xlabel,
+            ylabel=pub_ylabel,
             overlay_lines=overlays,
-            dpi=cfg.dpi)
-        
+            dpi=cfg.dpi,
+        )
+
         # Generate multiple azimuthal perspectives for selection
         heatmap_explained_frac_with_pca3d_azimuth_series(
-            temp, frac, metrics["explained_frac"], Yp,
+            temp,
+            frac,
+            metrics["explained_frac"],
+            Yp,
             pub_title,
             figs_dir / "heatmap_explained_frac_lines_azimuth",
-            bins_t=cfg.hm_bins_temp, bins_f=cfg.hm_bins_frac,
-            sigma_px=cfg.hm_sigma_px, clip=cfg.hm_clip,
-            vmin=0.0, vmax=1.0,
-            xlabel=pub_xlabel, ylabel=pub_ylabel,
+            bins_t=cfg.hm_bins_temp,
+            bins_f=cfg.hm_bins_frac,
+            sigma_px=cfg.hm_sigma_px,
+            clip=cfg.hm_clip,
+            vmin=0.0,
+            vmax=1.0,
+            xlabel=pub_xlabel,
+            ylabel=pub_ylabel,
             overlay_lines=overlays,
             azimuth_angles=[0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330],
-            dpi=cfg.dpi)
-        heatmap_binned_tf(temp, frac, metrics["worst_retention"],
-                          f"{descriptor}: heatmap worst retention",
-                          figs_dir / "heatmap_worst_retention",
-                          bins_t=cfg.hm_bins_temp, bins_f=cfg.hm_bins_frac,
-                          sigma_px=cfg.hm_sigma_px, clip=cfg.hm_clip, vmin=0.0, vmax=1.0, dpi=cfg.dpi)
+            dpi=cfg.dpi,
+        )
+        heatmap_binned_tf(
+            temp,
+            frac,
+            metrics["worst_retention"],
+            f"{descriptor}: heatmap worst retention",
+            figs_dir / "heatmap_worst_retention",
+            bins_t=cfg.hm_bins_temp,
+            bins_f=cfg.hm_bins_frac,
+            sigma_px=cfg.hm_sigma_px,
+            clip=cfg.hm_clip,
+            vmin=0.0,
+            vmax=1.0,
+            dpi=cfg.dpi,
+        )
 
-        heatmap_binned_tf(temp, frac, metrics["loo_uninformative_flag"].astype(np.float64),
-                          f"{descriptor}: heatmap LOO uninformative flag (1=geometry-saturated)",
-                          figs_dir / "heatmap_loo_uninformative_flag",
-                          bins_t=cfg.hm_bins_temp, bins_f=cfg.hm_bins_frac,
-                          sigma_px=cfg.hm_sigma_px, clip=None, vmin=0.0, vmax=1.0, dpi=cfg.dpi)
-        heatmap_binned_tf(temp, frac, metrics["loo_uninformative_dof_norm"],
-                          f"{descriptor}: heatmap dof_norm = dof/(k-1)",
-                          figs_dir / "heatmap_loo_uninformative_dof_norm",
-                          bins_t=cfg.hm_bins_temp, bins_f=cfg.hm_bins_frac,
-                          sigma_px=cfg.hm_sigma_px, clip=cfg.hm_clip, vmin=0.0, vmax=1.0, dpi=cfg.dpi)
-        heatmap_binned_tf(temp, frac, metrics["loo_uninformative_align"],
-                          f"{descriptor}: heatmap align = |v0^T sqrt(w)|",
-                          figs_dir / "heatmap_loo_uninformative_align",
-                          bins_t=cfg.hm_bins_temp, bins_f=cfg.hm_bins_frac,
-                          sigma_px=cfg.hm_sigma_px, clip=cfg.hm_clip, vmin=0.0, vmax=1.0, dpi=cfg.dpi)
+        heatmap_binned_tf(
+            temp,
+            frac,
+            metrics["loo_uninformative_flag"].astype(np.float64),
+            f"{descriptor}: heatmap LOO uninformative flag (1=geometry-saturated)",
+            figs_dir / "heatmap_loo_uninformative_flag",
+            bins_t=cfg.hm_bins_temp,
+            bins_f=cfg.hm_bins_frac,
+            sigma_px=cfg.hm_sigma_px,
+            clip=None,
+            vmin=0.0,
+            vmax=1.0,
+            dpi=cfg.dpi,
+        )
+        heatmap_binned_tf(
+            temp,
+            frac,
+            metrics["loo_uninformative_dof_norm"],
+            f"{descriptor}: heatmap dof_norm = dof/(k-1)",
+            figs_dir / "heatmap_loo_uninformative_dof_norm",
+            bins_t=cfg.hm_bins_temp,
+            bins_f=cfg.hm_bins_frac,
+            sigma_px=cfg.hm_sigma_px,
+            clip=cfg.hm_clip,
+            vmin=0.0,
+            vmax=1.0,
+            dpi=cfg.dpi,
+        )
+        heatmap_binned_tf(
+            temp,
+            frac,
+            metrics["loo_uninformative_align"],
+            f"{descriptor}: heatmap align = |v0^T sqrt(w)|",
+            figs_dir / "heatmap_loo_uninformative_align",
+            bins_t=cfg.hm_bins_temp,
+            bins_f=cfg.hm_bins_frac,
+            sigma_px=cfg.hm_sigma_px,
+            clip=cfg.hm_clip,
+            vmin=0.0,
+            vmax=1.0,
+            dpi=cfg.dpi,
+        )
 
     flagged_frac = float(np.mean(metrics["loo_uninformative_flag"].astype(np.float64)))
 
@@ -1513,14 +1908,16 @@ def main() -> None:
     merged_meta = dict(meta0)
     merged_meta["X_shape"] = xmeta["X_shape"]
     merged_meta["Y_projected_shape"] = Y_use.shape
-    
+
     inj_meta = dict(
         created_utc=_utc_now_z(),
         config=asdict(cfg),
         files=dict(
             csv=str(csv_path),
             figs=str(figs_dir),
-            pca_components=str(out_root / "pca_components.pt") if cfg.use_global_pca else None,
+            pca_components=(
+                str(out_root / "pca_components.pt") if cfg.use_global_pca else None
+            ),
         ),
         summary=summary,
         load_metadata=merged_meta,

@@ -5,9 +5,10 @@ potts_control_lines_corr2d_mosaic_avg.py
 
 Compact publication figure:
 
-Two sweeps, each displayed as 2 rows × 6 cols (stacked => 4 × 6 total):
-  A) f0 fixed at 0.30, T in [0.6, 0.7, 0.8, 0.9, 1.0, 1.1]
-  B) T fixed at 0.60, f0 in linspace(0.2, 0.8, 6)
+Three sweeps, each displayed as 2 rows × 6 cols (stacked => 6 × 6 total), A→B→C high f0 to low f0:
+  A) f0 fixed at 0.80, T in [0.6, 0.7, 0.8, 0.9, 1.0, 1.1]
+  B) T fixed at 0.60, f0 in [0.25, 0.35, 0.45, 0.55, 0.65, 0.75]
+  C) f0 fixed at 0.20, T in [0.6, 0.7, 0.8, 0.9, 1.0, 1.1]
 
 Rows per sweep:
   1) Microstructure (single deterministic run)
@@ -287,58 +288,65 @@ def plot_compact(
     fracs_line: np.ndarray,
     temps_frac: np.ndarray,
     fracs_frac: np.ndarray,
+    temps_line_C: np.ndarray,
+    fracs_line_C: np.ndarray,
     micro_T: np.ndarray, corrT_avg: np.ndarray,   # micro: (6,H,W), corr: (6,4,H',W')
     micro_F: np.ndarray, corrF_avg: np.ndarray,
+    micro_C: np.ndarray, corrC_avg: np.ndarray,
     pair_names: List[str],                         # ["0-0","0-1","1-1","1-2"]
     dpi: int,
 ) -> None:
-    # Global per-channel normalization across both sweeps
+    # Global per-channel normalization across all three sweeps
     P = int(corrT_avg.shape[1])
     assert P == 4
 
     vmin = np.zeros((P,), dtype=np.float64)
     vmax = np.zeros((P,), dtype=np.float64)
     for p in range(P):
-        allp = np.concatenate([corrT_avg[:, p], corrF_avg[:, p]], axis=0)
+        allp = np.concatenate([corrT_avg[:, p], corrF_avg[:, p], corrC_avg[:, p]], axis=0)
         vmin[p] = float(np.min(allp))
         vmax[p] = float(np.max(allp))
 
     # Build 2x2 mosaics per condition
     mosa_T = []
     mosa_F = []
+    mosa_C = []
     for c in range(6):
         cT = [normalize01(corrT_avg[c, p], vmin[p], vmax[p]) for p in range(P)]
         cF = [normalize01(corrF_avg[c, p], vmin[p], vmax[p]) for p in range(P)]
+        cC = [normalize01(corrC_avg[c, p], vmin[p], vmax[p]) for p in range(P)]
         mosa_T.append(make_mosaic_2x2(cT[0], cT[1], cT[2], cT[3], pad=2))
         mosa_F.append(make_mosaic_2x2(cF[0], cF[1], cF[2], cF[3], pad=2))
+        mosa_C.append(make_mosaic_2x2(cC[0], cC[1], cC[2], cC[3], pad=2))
 
     mosa_T = np.stack(mosa_T, axis=0)  # (6, Hm, Wm)
     mosa_F = np.stack(mosa_F, axis=0)
+    mosa_C = np.stack(mosa_C, axis=0)
 
-    fig = plt.figure(figsize=(18, 12))
-    gs = gridspec.GridSpec(4, 6, figure=fig, hspace=0.02, wspace=0.02, 
+    fig = plt.figure(figsize=(18, 18))
+    gs = gridspec.GridSpec(6, 6, figure=fig, hspace=0.02, wspace=0.02, 
                            left=0.07, right=0.995, top=0.96, bottom=0.06,
-                           height_ratios=[1, 1, 1, 1])
-    # Add extra space between rows 1 and 2 (between A and B)
+                           height_ratios=[1, 1, 1, 1, 1, 1])
+    # Add extra space between panels A, B, C
     gs.update(hspace=0.15)
     
-    axes = np.empty((4, 6), dtype=object)
-    for i in range(4):
+    axes = np.empty((6, 6), dtype=object)
+    for i in range(6):
         for j in range(6):
             axes[i, j] = fig.add_subplot(gs[i, j])
 
-    # Row 0: micro (A)
+    # Row 0: micro (A) f0=0.8 high
     for c in range(6):
-        axes[0, c].imshow(micro_T[c], cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
+        axes[0, c].imshow(micro_C[c], cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
         axes[0, c].set_axis_off()
-        axes[0, c].set_title(f"$T={temps_line[c]:.1f}$  $f_0=0.2$", fontsize=12, pad=6)
+        axes[0, c].set_title(f"$T={temps_line_C[c]:.1f}$  $f_0=0.8$", fontsize=12, pad=6)
 
     # Row 1: corr mosaic avg (A)
     for c in range(6):
-        axes[1, c].imshow(mosa_T[c], cmap="gray", vmin=0.0, vmax=1.0, interpolation="bilinear")
+        axes[1, c].imshow(mosa_C[c], cmap="gray", vmin=0.0, vmax=1.0, interpolation="bilinear")
         axes[1, c].set_axis_off()
 
-    # Row 2: micro (B)
+    # Row 2: micro (B) f0 sweep mid
     for c in range(6):
         axes[2, c].imshow(micro_F[c], cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
         axes[2, c].set_axis_off()
@@ -348,6 +356,17 @@ def plot_compact(
     for c in range(6):
         axes[3, c].imshow(mosa_F[c], cmap="gray", vmin=0.0, vmax=1.0, interpolation="bilinear")
         axes[3, c].set_axis_off()
+
+    # Row 4: micro (C) f0=0.2 low
+    for c in range(6):
+        axes[4, c].imshow(micro_T[c], cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
+        axes[4, c].set_axis_off()
+        axes[4, c].set_title(f"$T={temps_line[c]:.1f}$  $f_0=0.2$", fontsize=12, pad=6)
+
+    # Row 5: corr mosaic avg (C)
+    for c in range(6):
+        axes[5, c].imshow(mosa_T[c], cmap="gray", vmin=0.0, vmax=1.0, interpolation="bilinear")
+        axes[5, c].set_axis_off()
 
     # Left labels
     axes[0, 0].text(-0.23, 0.5, "Microstructure", transform=axes[0, 0].transAxes,
@@ -360,10 +379,16 @@ def plot_compact(
     axes[3, 0].text(-0.23, 0.5, f"Corr2D avg mosaic\n({pair_names[0]},{pair_names[1]}; {pair_names[2]},{pair_names[3]})",
                     transform=axes[3, 0].transAxes,
                     fontsize=12, fontweight="bold", rotation=90, va="center", ha="center")
+    axes[4, 0].text(-0.23, 0.5, "Microstructure", transform=axes[4, 0].transAxes,
+                    fontsize=13, fontweight="bold", rotation=90, va="center", ha="center")
+    axes[5, 0].text(-0.23, 0.5, f"Corr2D avg mosaic\n({pair_names[0]},{pair_names[1]}; {pair_names[2]},{pair_names[3]})",
+                    transform=axes[5, 0].transAxes,
+                    fontsize=12, fontweight="bold", rotation=90, va="center", ha="center")
 
     # Panel labels
     axes[0, 0].text(-0.3, 1.05, "A", transform=axes[0, 0].transAxes, fontsize=26, fontweight="bold")
     axes[2, 0].text(-0.3, 1.05, "B", transform=axes[2, 0].transAxes, fontsize=26, fontweight="bold")
+    axes[4, 0].text(-0.3, 1.05, "C", transform=axes[4, 0].transAxes, fontsize=26, fontweight="bold")
 
     out_png = outdir / "potts_control_lines_corr2d_avg_mosaic_00_01_11_12.png"
     out_pdf = outdir / "potts_control_lines_corr2d_avg_mosaic_00_01_11_12.pdf"
@@ -389,8 +414,10 @@ def main() -> None:
     ap.add_argument("--n_repeats", type=int, default=100)
     ap.add_argument("--seed_micro_A", type=int, default=2024)
     ap.add_argument("--seed_micro_B", type=int, default=2041)
+    ap.add_argument("--seed_micro_C", type=int, default=2058)
     ap.add_argument("--seed_repeat_base_A", type=int, default=9001)
     ap.add_argument("--seed_repeat_base_B", type=int, default=19001)
+    ap.add_argument("--seed_repeat_base_C", type=int, default=29001)
 
     ap.add_argument("--corr_downsample", type=int, default=1)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -423,7 +450,10 @@ def main() -> None:
     fracs_line = np.full((6,), 0.20, dtype=np.float32)
 
     temps_frac = np.full((6,), 0.60, dtype=np.float32)
-    fracs_frac = np.array([0.3, 0.4, 0.5, 0.6, 0.7, 0.8], dtype=np.float32)
+    fracs_frac = np.array([0.25, 0.35, 0.45, 0.55, 0.65, 0.75], dtype=np.float32)
+
+    temps_line_C = np.array([0.6, 0.7, 0.8, 0.9, 1.0, 1.1], dtype=np.float32)
+    fracs_line_C = np.full((6,), 0.80, dtype=np.float32)
 
     # Pairs for 2×2 mosaic: [ [0-0, 0-1], [1-1, 1-2] ]
     pair_names = ["0-0", "0-1", "1-1", "1-2"]
@@ -467,14 +497,36 @@ def main() -> None:
         progress_every=int(args.progress_every),
     )
 
+    # Panel C
+    print("[C] micro + corr2d(avg) sweep T with f0=0.80")
+    micro_C, corrC_avg = run_sweep_avg(
+        temperatures=temps_line_C,
+        fractions0=fracs_line_C,
+        grid_size=grid,
+        steps=steps,
+        q=q,
+        periodic=periodic,
+        remove_spurious=remove_spurious,
+        n_repeats=n_repeats,
+        seed_micro=int(args.seed_micro_C),
+        seed_repeat_base=int(args.seed_repeat_base_C),
+        pair_indices=pair_indices,
+        corr_downsample=corr_downsample,
+        device=device,
+        progress_every=int(args.progress_every),
+    )
+
     plot_compact(
         outdir=outdir,
         temps_line=temps_line,
         fracs_line=fracs_line,
         temps_frac=temps_frac,
         fracs_frac=fracs_frac,
+        temps_line_C=temps_line_C,
+        fracs_line_C=fracs_line_C,
         micro_T=micro_T, corrT_avg=corrT_avg,
         micro_F=micro_F, corrF_avg=corrF_avg,
+        micro_C=micro_C, corrC_avg=corrC_avg,
         pair_names=pair_names,
         dpi=int(args.dpi),
     )
