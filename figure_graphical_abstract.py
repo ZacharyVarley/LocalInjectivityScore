@@ -1,387 +1,325 @@
+"""
+Graphical abstract for "A Data-Driven Test of Local Recoverability for Materials Design"
+Vector PDF output. Editable, typo-free, built from matplotlib primitives.
+"""
+
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Circle
-from matplotlib.path import Path
-from matplotlib.colors import Normalize
-from matplotlib import cm
-import matplotlib.patheffects as pe
+from matplotlib.patches import Ellipse, Circle, Rectangle
+from matplotlib.gridspec import GridSpec
 from scipy.ndimage import gaussian_filter
+from mpl_toolkits.mplot3d import Axes3D  # noqa
 
-plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Helvetica', 'Arial']
-plt.rcParams['mathtext.fontset'] = 'dejavusans'
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["DejaVu Serif", "Times New Roman", "Times"],
+    "mathtext.fontset": "cm",
+    "axes.titlesize": 12,
+    "axes.labelsize": 10,
+    "font.size": 10,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
 
-fig = plt.figure(figsize=(14, 7.5), dpi=250, facecolor='#fafaf7')
+fig = plt.figure(figsize=(13.8, 4.4))
+gs = GridSpec(1, 4, figure=fig, width_ratios=[1.0, 1.0, 1.15, 1.0],
+              wspace=0.18, left=0.045, right=0.965, top=0.88, bottom=0.10)
 
-# ---- HELPERS ----
-def generate_micro(size=80, seed=42, sigma=3.5, threshold=0.0):
-    np.random.seed(seed)
-    noise = np.random.randn(size, size)
-    smooth = gaussian_filter(noise, sigma=sigma)
-    return (smooth > threshold).astype(float)
+# =============================================================================
+# Panel 1: Control space
+# =============================================================================
+ax1 = fig.add_subplot(gs[0, 0])
+np.random.seed(7)
+N = 320
+x1 = np.random.uniform(-1, 1, N)
+x2 = np.random.uniform(-1, 1, N)
+color_field = 0.6 * x1 + 0.4 * x2 + 0.3 * np.sin(2 * x1)
+ax1.scatter(x1, x2, c=color_field, cmap="Spectral_r",
+            s=22, edgecolor="white", linewidth=0.3, zorder=3)
 
-def generate_score_map(size=80, base_score=0.8, noise_level=0.03, center_dip=False):
-    np.random.seed(42)
-    x = np.linspace(-1, 1, size)
-    y = np.linspace(-1, 1, size)
-    X, Y = np.meshgrid(x, y)
-    distSq = X**2 + Y**2
-    
-    if center_dip:
-        # Non-identifiable: base score is low, but we want a "blue" spot in the middle
-        # Viridis 0.15 is purple. Viridis 0.4 is blue/teal.
-        score = base_score - 0.35 * np.exp(-10 * distSq)
-    else:
-        # Identifiable: high score with some slight coherent variation + noise
-        score = np.full((size, size), base_score)
-        score += 0.04 * np.cos(3 * X) * np.sin(3 * Y)
-    
-    score += np.random.randn(size, size) * noise_level
-    return np.clip(score, 0, 1)
+ax1.set_xlim(-1.05, 1.05)
+ax1.set_ylim(-1.05, 1.05)
+ax1.set_xticks([])
+ax1.set_yticks([])
+ax1.set_xlabel("$x_1$")
+ax1.set_ylabel("$x_2$", rotation=0, labelpad=10)
+ax1.set_aspect("equal")
+for spine in ax1.spines.values():
+    spine.set_linewidth(0.8)
 
-def viridis_rgb(val):
-    """Return RGBA tuple for a 0-1 value on viridis."""
-    cmap = plt.colormaps['viridis']
-    return cmap(val)
+ax1.text(0.5, -0.16,
+         "Process controls $x_i$\nsampled across a 2D\ndesign space",
+         transform=ax1.transAxes, ha="center", va="top",
+         fontsize=8.0, style="italic", color="#444")
 
-def draw_3d_box_scored(ax, x, y, w, h, d, score, ec='#999', noisy=False, center_dip=False):
-    """Draw a 3D box with front face colored by viridis score."""
-    dx, dy = d * 0.4, d * 0.3
-    
-    if noisy:
-        s_map = generate_score_map(size=80, base_score=score, center_dip=center_dip)
-        ax.imshow(s_map, extent=[x, x+w, y, y+h], origin='lower', 
-                  cmap='viridis', zorder=2, interpolation='bilinear', vmin=0, vmax=1)
-        # Outline for front
-        rect = plt.Rectangle((x, y), w, h, fill=False, ec=ec, lw=0.5, zorder=3)
-        ax.add_patch(rect)
-        display_score = np.mean(s_map)
-    else:
-        face_color = viridis_rgb(score)
-        front = plt.Polygon([[x,y],[x+w,y],[x+w,y+h],[x,y+h]], closed=True,
-                            fc=face_color, ec=ec, lw=0.5, zorder=2)
-        ax.add_patch(front)
-        display_score = score
-        
-    # Darken for top/side
-    top_color = viridis_rgb(min(1, display_score + 0.08))
-    side_color = viridis_rgb(max(0, display_score - 0.08))
-    
-    top = plt.Polygon([[x,y+h],[x+dx,y+h+dy],[x+w+dx,y+h+dy],[x+w,y+h]], closed=True,
-                      fc=top_color, ec=ec, lw=0.5, zorder=2)
-    right = plt.Polygon([[x+w,y],[x+w+dx,y+dy],[x+w+dx,y+h+dy],[x+w,y+h]], closed=True,
-                        fc=side_color, ec=ec, lw=0.5, zorder=2)
-    ax.add_patch(top); ax.add_patch(right)
+# =============================================================================
+# Panel 2: Microstructure data  (wider spread, ellipses to the right)
+# =============================================================================
+ax2 = fig.add_subplot(gs[0, 1])
+ax2.set_xlim(0, 1)
+ax2.set_ylim(0, 1)
+ax2.set_aspect("equal")
+ax2.axis("off")
 
-def draw_3d_manifold(ax, cx, cy, w, h, d, fill_color, edge_color, pinch=0.5):
-    """Draw a 3D extruded manifold shape with depth."""
-    hw, hh = w/2, h/2
-    neck = pinch * hw
-    dx, dy = d * 0.35, d * 0.25
-    
-    # Generate the 2D profile points (right side, top to bottom)
-    n = 60
-    right_profile = []
-    for i in range(n+1):
-        t = i / n
-        if t <= 0.5:
-            width = hw - (hw - neck) * (2*t)**2
-        else:
-            width = neck + (hw - neck) * (2*(t-0.5))**2
-        yy = cy + hh - 2*hh*t
-        right_profile.append((cx + width, yy))
-    
-    # Left profile (mirror)
-    left_profile = []
-    for i in range(n+1):
-        t = i / n
-        if t <= 0.5:
-            width = hw - (hw - neck) * (2*t)**2
-        else:
-            width = neck + (hw - neck) * (2*(t-0.5))**2
-        yy = cy - hh + 2*hh*t
-        left_profile.append((cx - width, yy))
-    
-    # Back face (offset by dx, dy) - draw first
-    back_verts = [(px + dx, py + dy) for (px, py) in right_profile]
-    back_verts += [(px + dx, py + dy) for (px, py) in left_profile]
-    back_verts.append(back_verts[0])
-    back_codes = [Path.MOVETO] + [Path.LINETO] * (len(back_verts) - 2) + [Path.CLOSEPOLY]
-    
-    # Slightly darker fill for back
-    import matplotlib.colors as mcolors
-    r, g, b = mcolors.to_rgb(fill_color)
-    back_color = (max(0, r - 0.06), max(0, g - 0.06), max(0, b - 0.06))
-    
-    ax.add_patch(mpatches.PathPatch(Path(back_verts, back_codes),
-                 fc=back_color, ec=edge_color, lw=0.6, alpha=0.5, zorder=0))
-    
-    # Top connecting face (between front-top and back-top edges)
-    # Connect the top curves of front and back
-    top_verts = []
-    top_codes = []
-    # Front top edge (right profile, first ~15 points where y is near top)
-    front_top = right_profile[:8]
-    back_top = [(px + dx, py + dy) for (px, py) in front_top]
-    
-    top_face = front_top + list(reversed(back_top))
-    top_face.append(top_face[0])
-    top_codes_l = [Path.MOVETO] + [Path.LINETO] * (len(top_face) - 2) + [Path.CLOSEPOLY]
-    ax.add_patch(mpatches.PathPatch(Path(top_face, top_codes_l),
-                 fc=back_color, ec=edge_color, lw=0.4, alpha=0.4, zorder=0.5))
-    
-    # Right side connecting strips (between front right profile and back right profile)
-    for i in range(len(right_profile)-1):
-        strip = [
-            right_profile[i],
-            right_profile[i+1],
-            (right_profile[i+1][0] + dx, right_profile[i+1][1] + dy),
-            (right_profile[i][0] + dx, right_profile[i][1] + dy),
-            right_profile[i]
-        ]
-        strip_codes = [Path.MOVETO, Path.LINETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY]
-        
-        # Color the side strips by viridis based on y-position (distance from center)
-        mid_y = (strip[0][1] + strip[1][1]) / 2
-        t_norm = abs(mid_y - cy) / hh  # 0 at center, 1 at edges
-        side_alpha = 0.3
-        side_c = viridis_rgb(t_norm * 0.4 + 0.1)
-        
-        ax.add_patch(mpatches.PathPatch(Path(strip, strip_codes),
-                     fc=side_c, ec='none', lw=0, alpha=side_alpha, zorder=0.5))
-    
-    # Front face (on top)
-    front_verts = right_profile + left_profile
-    front_verts.append(front_verts[0])
-    front_codes = [Path.MOVETO] + [Path.LINETO] * (len(front_verts) - 2) + [Path.CLOSEPOLY]
 
-    # --- NEW: Top Flat Face (Parallelogram) ---
-    # Connect Top-Left-Front -> Top-Right-Front -> Top-Right-Back -> Top-Left-Back
-    # left_profile[-1] is Top-Left Front
-    # right_profile[0] is Top-Right Front
-    tl_f = left_profile[-1]
-    tr_f = right_profile[0]
-    tr_b = (tr_f[0] + dx, tr_f[1] + dy)
-    tl_b = (tl_f[0] + dx, tl_f[1] + dy)
-    
-    top_flat_verts = [tl_f, tr_f, tr_b, tl_b, tl_f]
-    top_flat_codes = [Path.MOVETO, Path.LINETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY]
-    
-    # Use same color as top-connecting face (darker fill)
-    ax.add_patch(mpatches.PathPatch(Path(top_flat_verts, top_flat_codes),
-                 fc=back_color, ec=edge_color, lw=0.6, alpha=0.6, zorder=0.6))
+def make_ch_like(seed, size=80):
+    rng = np.random.default_rng(seed)
+    f = rng.standard_normal((size, size))
+    f = gaussian_filter(f, sigma=3.5)
+    return (f > 0).astype(float)
 
-    ax.add_patch(mpatches.PathPatch(Path(front_verts, front_codes),
-                 fc=fill_color, ec=edge_color, lw=1.2, zorder=1))
 
-# ============================================================
-# PANEL 1: IDENTIFIABLE (top)
-# ============================================================
-ax1 = fig.add_axes([0.01, 0.51, 0.49, 0.46])
-ax1.set_xlim(0, 10)
-ax1.set_ylim(0, 5.2)
-ax1.set_aspect('equal')
-ax1.axis('off')
+def make_voronoi_like(seed, size=80, n_seeds=18):
+    rng = np.random.default_rng(seed)
+    pts = rng.uniform(0, size, (n_seeds, 2))
+    grid_y, grid_x = np.mgrid[0:size, 0:size]
+    d2 = (grid_x[..., None] - pts[:, 0])**2 + (grid_y[..., None] - pts[:, 1])**2
+    labels = np.argmin(d2, axis=2)
+    shade = rng.uniform(0.2, 1.0, n_seeds)
+    return shade[labels]
 
-bg1 = FancyBboxPatch((0.05, 0.05), 9.9, 4.85, boxstyle="round,pad=0.12",
-                      fc='white', ec='#d8d8d0', lw=0.7, zorder=0)
-ax1.add_patch(bg1)
-ax1.text(5, 5.15, 'I D E N T I F I A B L E', fontsize=10, fontweight='bold',
-         color='#1a9850', ha='center', va='top', zorder=5)
 
-# Control box - HIGH score (yellow-green)
-draw_3d_box_scored(ax1, 0.4, 0.7, 1.6, 2.3, 0.5, score=0.88, noisy=True)
-ax1.text(1.2, 0.4, r'$x_1$', fontsize=9, color='#333', ha='center', style='italic')
-ax1.text(0.12, 1.85, r'$x_2$', fontsize=9, color='#333', ha='center', style='italic', rotation=90)
-ax1.text(1.35, 3.35, 'Control Space', fontsize=7.5, fontweight='bold', color='#555', ha='center')
+def make_fft_pattern(seed, size=80):
+    rng = np.random.default_rng(seed)
+    xx, yy = np.meshgrid(np.linspace(-1, 1, size), np.linspace(-1, 1, size))
+    r = np.sqrt(xx**2 + yy**2)
+    base = np.exp(-12 * r**2)
+    base += 0.4 * np.exp(-30 * (r - 0.35)**2) * np.cos(
+        6 * np.arctan2(yy, xx) + rng.uniform(0, 2 * np.pi)
+    )
+    return base
 
-# Score label on the box
-ax1.text(1.2, 1.85, r'$e \approx 1$', fontsize=12, color='#333', ha='center', va='center',
-         fontweight='bold', zorder=6)
 
-# Control points
-ax1.add_patch(Circle((0.9, 2.4), 0.1, fc='#1a9850', ec='white', lw=1.3, zorder=5))
-ax1.add_patch(Circle((1.6, 1.2), 0.1, fc='#2e7d32', ec='white', lw=1.3, zorder=5))
+# Wider spread: each card reveals ~55% of the previous; stack fills more width
+stack_generators = [
+    (make_voronoi_like, 11, "gray"),
+    (make_ch_like,      17, "gray"),
+    (make_fft_pattern,  51, "magma"),
+]
+n_cards = len(stack_generators)
+card_w, card_h = 0.30, 0.30
+step_x = 0.17
+step_y = 0.025
+base_x, base_y = 0.03, 0.33
 
-# f label and arrows
-ax1.text(3.05, 2.9, r'$f$', fontsize=12, color='#333', ha='center', style='italic')
-ax1.annotate('', xy=(3.8, 2.3), xytext=(2.35, 2.4),
-            arrowprops=dict(arrowstyle='->', color='#1a9850', lw=1.3))
-ax1.annotate('', xy=(3.8, 1.4), xytext=(2.35, 1.2),
-            arrowprops=dict(arrowstyle='->', color='#2e7d32', lw=1.3))
+for i, (gen, seed, cm) in enumerate(stack_generators):
+    bx = base_x + i * step_x
+    by = base_y + i * step_y
+    border = Rectangle((bx - 0.012, by - 0.012),
+                       card_w + 0.024, card_h + 0.024,
+                       facecolor="white", edgecolor="#444", linewidth=0.8,
+                       transform=ax2.transAxes, zorder=2 * i + 1)
+    ax2.add_patch(border)
+    inner = ax2.inset_axes([bx, by, card_w, card_h])
+    inner.imshow(gen(seed), cmap=cm, interpolation="nearest", aspect="equal")
+    inner.set_xticks([])
+    inner.set_yticks([])
+    for sp in inner.spines.values():
+        sp.set_visible(False)
+    inner.set_zorder(2 * i + 2)
 
-# 3D Descriptor manifold
-draw_3d_manifold(ax1, 5.0, 1.95, 1.8, 2.8, 0.55, '#f1f8e9', '#66bb6a', pinch=0.6)
-ax1.text(5.0, 3.6, 'Descriptor Space', fontsize=7.5, fontweight='bold', color='#555', ha='center')
+# Ellipsis dots immediately to the right of the topmost card
+top_card_right = base_x + (n_cards - 1) * step_x + card_w + 0.018
+top_card_y_center = base_y + (n_cards - 1) * step_y + card_h / 2
+for dx in [0.025, 0.060, 0.095]:
+    ax2.plot(top_card_right + dx, top_card_y_center,
+             marker="o", color="#444", markersize=3.5,
+             transform=ax2.transAxes, zorder=20, clip_on=False)
 
-# Well-separated descriptor points
-ax1.add_patch(Circle((4.8, 2.5), 0.1, fc='#1a9850', ec='white', lw=1.3, zorder=5))
-ax1.add_patch(Circle((5.2, 1.3), 0.1, fc='#2e7d32', ec='white', lw=1.3, zorder=5))
-ax1.add_patch(Circle((4.8, 2.5), 0.38, fc='none', ec='#1a9850', lw=0.7, ls='--', zorder=4, alpha=0.5))
-ax1.add_patch(Circle((5.2, 1.3), 0.38, fc='none', ec='#2e7d32', lw=0.7, ls='--', zorder=4, alpha=0.5))
+ax2.text(0.5, 0.10,
+         "Distinct controls may yield\nvisibly different fields but\nsimilar descriptor values",
+         transform=ax2.transAxes, ha="center", va="top",
+         fontsize=8.0, style="italic", color="#444")
 
-# Dashed lines to micros
-ax1.plot([5.65, 6.55], [2.5, 2.55], '--', color='#1a9850', lw=0.5, alpha=0.4, zorder=3)
-ax1.plot([5.65, 6.55], [1.3, 1.2], '--', color='#2e7d32', lw=0.5, alpha=0.4, zorder=3)
+# =============================================================================
+# Panel 3: Descriptor space (main cloud + clearly visible blue cluster)
+# =============================================================================
+ax3 = fig.add_subplot(gs[0, 2], projection="3d")
 
-# Microstructure insets
-micro1 = generate_micro(80, seed=42, sigma=3.5)
-micro2 = generate_micro(80, seed=77, sigma=4.5)
+np.random.seed(11)
+M = 600
+u = np.random.uniform(-1, 1, M)
+v = np.random.uniform(-1, 1, M)
 
-ax_m1 = fig.add_axes([0.33, 0.75, 0.05, 0.09])
-ax_m1.imshow(micro1, cmap='gray', interpolation='nearest', vmin=0, vmax=1)
-ax_m1.set_xticks([]); ax_m1.set_yticks([])
-for s in ax_m1.spines.values(): s.set_edgecolor('#1a9850'); s.set_linewidth(1.8)
+# --- Main sheet: smooth color gradient blue (low u) -> red (high u)
+width_at_v = 1.0 - 0.35 * (v + 1) / 2.0
+X_main = u * width_at_v + 0.04 * np.random.randn(M)
+Y_main = v + 0.04 * np.random.randn(M)
+Z_main = 0.10 * u * v + 0.04 * np.random.randn(M)
 
-ax_m2 = fig.add_axes([0.33, 0.58, 0.05, 0.09])
-ax_m2.imshow(micro2, cmap='gray', interpolation='nearest', vmin=0, vmax=1)
-ax_m2.set_xticks([]); ax_m2.set_yticks([])
-for s in ax_m2.spines.values(): s.set_edgecolor('#2e7d32'); s.set_linewidth(1.8)
+ax3.scatter(X_main, Y_main, Z_main, c=u, cmap="Spectral_r",
+            s=14, alpha=0.85, edgecolor="white", linewidth=0.2,
+            vmin=-1, vmax=1)
 
-# Check label
-ax1.text(8.2, 0.35, '✓  Distinct outcomes → stable inverse', fontsize=7.5, color='#1a9850',
-         ha='center', fontweight='bold',
-         bbox=dict(boxstyle='round,pad=0.25', fc='#e8f5e9', ec='#a5d6a7', lw=0.5))
+# --- Blue cluster: low-u (blue) points placed where the main scatter is red.
+#     Rendered identically to the main points so it reads as part of the same
+#     population whose descriptor coords happen to overlap a different control
+#     region.
+Mf = 140
+uf = np.random.uniform(-0.95, -0.55, Mf)              # strongly blue
+Xf = 0.40 + 0.10 * np.random.randn(Mf)                 # scooted left a bit
+Yf = -0.45 + 0.12 * np.random.randn(Mf)
+Zf = 0.30 + 0.04 * np.random.randn(Mf)
+ax3.scatter(Xf, Yf, Zf, c=uf, cmap="Spectral_r",
+            s=14, alpha=0.85, edgecolor="white", linewidth=0.2,
+            vmin=-1, vmax=1)
 
-# ============================================================
-# PANEL 2: NON-IDENTIFIABLE (bottom)
-# ============================================================
-ax2 = fig.add_axes([0.01, 0.02, 0.49, 0.46])
-ax2.set_xlim(0, 10)
-ax2.set_ylim(0, 5.2)
-ax2.set_aspect('equal')
-ax2.axis('off')
+ax3.set_xticks([])
+ax3.set_yticks([])
+ax3.set_zticks([])
+ax3.grid(False)
+ax3.view_init(elev=22, azim=-55)
+ax3.set_box_aspect((1.2, 1.2, 0.8))
+for axis in (ax3.xaxis, ax3.yaxis, ax3.zaxis):
+    axis.pane.set_facecolor((1.0, 1.0, 1.0, 0.0))
+    axis.pane.set_edgecolor((1.0, 1.0, 1.0, 0.0))
+    axis.line.set_color((1.0, 1.0, 1.0, 0.0))
 
-bg2 = FancyBboxPatch((0.05, 0.05), 9.9, 4.85, boxstyle="round,pad=0.12",
-                      fc='white', ec='#d8d8d0', lw=0.7, zorder=0)
-ax2.add_patch(bg2)
-ax2.text(5, 5.15, 'N O N - I D E N T I F I A B L E', fontsize=10, fontweight='bold',
-         color='#c0392b', ha='center', va='top', zorder=5)
+# Annotations: cluster sits in the upper portion of the panel, so its
+# caption goes up; the well-separated caption moves to the lower region.
+ax3.text2D(0.02, 0.78, "Blue cluster: \n similar descriptors from\ndifferent controls",
+           transform=ax3.transAxes, fontsize=8.0, color="#1A4A78",
+           bbox=dict(boxstyle="round,pad=0.3", fc="white",
+                     ec="#1A4A78", lw=0.8, alpha=0.9))
+ax3.text2D(0.50, 0.02, "Locally well-\nseparated region",
+           transform=ax3.transAxes, fontsize=8.0, color="#1A4A78",
+           bbox=dict(boxstyle="round,pad=0.3", fc="white",
+                     ec="#1A4A78", lw=0.8, alpha=0.9))
 
-# Control box - LOW score (purple/dark)
-draw_3d_box_scored(ax2, 0.4, 0.7, 1.6, 2.3, 0.5, score=0.12, noisy=True, center_dip=True)
-ax2.text(1.2, 0.4, r'$x_1$', fontsize=9, color='#ccc', ha='center', style='italic')
-ax2.text(0.12, 1.85, r'$x_2$', fontsize=9, color='#ccc', ha='center', style='italic', rotation=90)
-ax2.text(1.35, 3.35, 'Control Space', fontsize=7.5, fontweight='bold', color='#555', ha='center')
+# =============================================================================
+# Panel 4: Local recoverability score heatmap (jet)
+# =============================================================================
+ax4 = fig.add_subplot(gs[0, 3])
 
-# Score label on the box
-ax2.text(1.2, 1.85, r'$e \approx 0$', fontsize=12, color='white', ha='center', va='center',
-         fontweight='bold', zorder=6)
+nx, ny = 80, 80
+xg = np.linspace(-1, 1, nx)
+yg = np.linspace(-1, 1, ny)
+Xg, Yg = np.meshgrid(xg, yg)
 
-# Control points
-ax2.add_patch(Circle((0.8, 2.6), 0.1, fc='#c0392b', ec='white', lw=1.3, zorder=5))
-ax2.add_patch(Circle((1.7, 1.0), 0.1, fc='#e74c3c', ec='white', lw=1.3, zorder=5))
+e_field = 0.85 * np.ones_like(Xg)
+e_field -= 0.7 * np.exp(-((Xg - 0.55)**2 + (Yg - 0.55)**2) / 0.10)
+e_field -= 0.35 * np.exp(-((Xg + 0.05)**2 / 0.5 + (Yg + 0.05)**2 / 0.04))
+e_field -= 0.45 * np.exp(-((Xg - 0.45)**2 + (Yg + 0.55)**2) / 0.15)
+e_field = gaussian_filter(e_field, sigma=1.2)
+e_field = np.clip(e_field, 0.05, 1.0)
 
-ax2.text(3.05, 2.9, r'$f$', fontsize=12, color='#333', ha='center', style='italic')
-ax2.annotate('', xy=(3.95, 2.0), xytext=(2.35, 2.6),
-            arrowprops=dict(arrowstyle='->', color='#c0392b', lw=1.3))
-ax2.annotate('', xy=(3.95, 1.85), xytext=(2.35, 1.0),
-            arrowprops=dict(arrowstyle='->', color='#e74c3c', lw=1.3))
+im = ax4.imshow(e_field, extent=[-1, 1, -1, 1], origin="lower",
+                cmap="jet", aspect="equal", vmin=0, vmax=1)
+ax4.contour(Xg, Yg, e_field, levels=[0.4, 0.65],
+            colors="black", linewidths=0.6, alpha=0.7)
 
-# 3D Descriptor manifold (more pinched)
-draw_3d_manifold(ax2, 5.0, 1.95, 1.8, 2.8, 0.55, '#fce4ec', '#e57373', pinch=0.35)
-ax2.text(5.0, 3.6, 'Descriptor Space', fontsize=7.5, fontweight='bold', color='#555', ha='center')
+ax4.set_xticks([])
+ax4.set_yticks([])
+ax4.set_xlabel("$x_1$")
+ax4.set_ylabel("$x_2$", rotation=0, labelpad=10)
+for spine in ax4.spines.values():
+    spine.set_linewidth(0.8)
 
-# Overlapping points
-ax2.add_patch(Circle((4.92, 1.98), 0.1, fc='#c0392b', ec='white', lw=1.3, zorder=5))
-ax2.add_patch(Circle((5.02, 1.88), 0.1, fc='#e74c3c', ec='white', lw=1.3, zorder=5))
-ax2.add_patch(Circle((4.97, 1.93), 0.5, fc=(0.75, 0.22, 0.17, 0.06), ec='#c0392b',
-                      lw=0.7, ls='--', zorder=4, alpha=0.5))
-ax2.text(4.97, 1.25, 'overlap', fontsize=6.5, color='#c0392b', ha='center', fontweight='bold')
+ax4.annotate("high\nscore", xy=(-0.55, -0.55), ha="center", va="center",
+             fontsize=8.5, color="#0B3D6B",
+             bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.85, ec="none"))
+ax4.annotate("ambiguous", xy=(-0.25, 0.0), ha="center", va="center",
+             fontsize=8.5, color="#3A2A0A",
+             bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.85, ec="none"))
+ax4.annotate("non-recoverable", xy=(0.55, 0.55), ha="center", va="center",
+             fontsize=8.0, color="#7A1A1A",
+             bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.88, ec="none"))
+ax4.annotate("poor local\nrecovery", xy=(0.45, -0.55), ha="center", va="center",
+             fontsize=8.0, color="#7A1A1A",
+             bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.88, ec="none"))
 
-# Similar microstructures
-micro3 = generate_micro(80, seed=13, sigma=3.3, threshold=0.02)
-micro4 = generate_micro(80, seed=13, sigma=3.3, threshold=-0.02)
+cbar = fig.colorbar(im, ax=ax4, fraction=0.046, pad=0.04, shrink=0.85)
+cbar.ax.tick_params(labelsize=7)
+cbar.set_label("$e_i$", rotation=0, labelpad=8, fontsize=10)
+cbar.outline.set_linewidth(0.6)
 
-ax2.plot([5.6, 6.55], [2.0, 2.55], '--', color='#c0392b', lw=0.5, alpha=0.4, zorder=3)
-ax2.plot([5.6, 6.55], [1.9, 1.2], '--', color='#e74c3c', lw=0.5, alpha=0.4, zorder=3)
+ax4.text(0.5, -0.16,
+         "High $e_i$: local control variation\nis recoverable from nearby\ndescriptor neighborhoods",
+         transform=ax4.transAxes, ha="center", va="top",
+         fontsize=8.0, style="italic", color="#444")
 
-ax_m3 = fig.add_axes([0.33, 0.26, 0.05, 0.09])
-ax_m3.imshow(micro3, cmap='gray', interpolation='nearest', vmin=0, vmax=1)
-ax_m3.set_xticks([]); ax_m3.set_yticks([])
-for s in ax_m3.spines.values(): s.set_edgecolor('#c0392b'); s.set_linewidth(1.8)
+# =============================================================================
+# Finalize: panel positions, aligned titles, arrows, k-NN inset
+# =============================================================================
+fig.canvas.draw()
+panel_axes = [ax1, ax2, ax3, ax4]
+boxes = [a.get_position() for a in panel_axes]
 
-ax_m4 = fig.add_axes([0.33, 0.09, 0.05, 0.09])
-ax_m4.imshow(micro4, cmap='gray', interpolation='nearest', vmin=0, vmax=1)
-ax_m4.set_xticks([]); ax_m4.set_yticks([])
-for s in ax_m4.spines.values(): s.set_edgecolor('#e74c3c'); s.set_linewidth(1.8)
+# --- Aligned panel titles via fig.text at a shared y figure-coord
+title_y = 0.93   # uniform y for all four titles
+title_texts = [
+    "Control space  $(x)$",
+    "Microstructure data",
+    "Descriptor space  $(y)$",
+    "Local recoverability score  $e_i$",
+]
+for text, box in zip(title_texts, boxes):
+    cx = 0.5 * (box.x0 + box.x1)
+    fig.text(cx, title_y, text, ha="center", va="bottom",
+             fontweight="bold", fontsize=12)
 
-# ≈ between micros
-ax2.text(7.5, 1.9, '≈', fontsize=16, color='#c0392b', ha='center', fontweight='bold', zorder=10)
 
-# X label
-ax2.text(8.2, 0.35, '✗  Overlapping outcomes → ambiguous inverse', fontsize=7.5, color='#c0392b',
-         ha='center', fontweight='bold',
-         bbox=dict(boxstyle='round,pad=0.25', fc='#ffebee', ec='#ef9a9a', lw=0.5))
+def draw_chunky_arrow(x0, x1, y, fig,
+                      shaft_h=0.045, head_h=0.085, head_len=0.011,
+                      facecolor="#B8D4F0", edgecolor="#7AA8D8"):
+    body_x1 = x1 - head_len
+    verts = [
+        (x0,      y - shaft_h / 2),
+        (body_x1, y - shaft_h / 2),
+        (body_x1, y - head_h / 2),
+        (x1,      y),
+        (body_x1, y + head_h / 2),
+        (body_x1, y + shaft_h / 2),
+        (x0,      y + shaft_h / 2),
+    ]
+    poly = mpatches.Polygon(verts, closed=True,
+                            facecolor=facecolor, edgecolor=edgecolor,
+                            linewidth=0.8, transform=fig.transFigure,
+                            zorder=10)
+    fig.patches.append(poly)
 
-# ============================================================
-# RIGHT: Score + Method panel
-# ============================================================
-ax3 = fig.add_axes([0.51, 0.02, 0.48, 0.95])
-ax3.set_xlim(0, 10)
-ax3.set_ylim(0, 22)
-ax3.set_aspect('auto')
-ax3.axis('off')
 
-bg3 = FancyBboxPatch((0.15, 0.15), 9.7, 21.3, boxstyle="round,pad=0.12",
-                      fc='white', ec='#d8d8d0', lw=0.7, zorder=0)
-ax3.add_patch(bg3)
+arrow_y = 0.52
+reference_arrow_length = min(
+    boxes[i + 1].x0 - boxes[i].x1 - 0.008 for i in range(2)
+)
+for i in range(3):
+    x_s = boxes[i].x1 + 0.004
+    x_e = boxes[i + 1].x0 - 0.004
+    if i == 2:
+        x_e = min(x_e, x_s + reference_arrow_length)
+    if x_e > x_s:
+        draw_chunky_arrow(x_s, x_e, arrow_y, fig)
 
-# Title
-ax3.text(5, 21.0, 'Identifiability Score  $e$', fontsize=14, fontweight='bold', color='#222',
-         ha='center', family='serif')
+# Square local k-NN inset, tucked into upper-right corner of panel 3
+fig_w, fig_h = fig.get_figwidth(), fig.get_figheight()
+panel3_box = boxes[2]
+inset_w_fig = 0.078
+inset_h_fig = inset_w_fig * (fig_w / fig_h)
+inset_x = panel3_box.x1 - inset_w_fig - 0.005
+inset_y = panel3_box.y1 - inset_h_fig - 0.04
+ax_inset = fig.add_axes([inset_x, inset_y, inset_w_fig, inset_h_fig])
+ax_inset.set_xlim(-1, 1)
+ax_inset.set_ylim(-1, 1)
+ax_inset.set_aspect("equal", adjustable="box")
+ax_inset.set_xticks([])
+ax_inset.set_yticks([])
+rng = np.random.default_rng(3)
+pts = rng.normal(0, 0.5, (60, 2))
+ax_inset.scatter(pts[:, 0], pts[:, 1], s=6, c="#888", alpha=0.6)
+anchor = np.array([0.1, 0.05])
+dists = np.linalg.norm(pts - anchor, axis=1)
+knn_idx = np.argsort(dists)[:12]
+ax_inset.scatter(pts[knn_idx, 0], pts[knn_idx, 1], s=14,
+                 c="#D4564B", edgecolor="white", linewidth=0.5)
+ax_inset.scatter(*anchor, s=50, marker="*", c="#1A1A1A", zorder=5)
+disk = Circle(anchor, 0.45, fill=False, edgecolor="#1A1A1A", lw=1.0, ls="--")
+ax_inset.add_patch(disk)
+ax_inset.set_title("local $k$-NN", fontsize=7.5, pad=2)
+for spine in ax_inset.spines.values():
+    spine.set_linewidth(0.6)
 
-# Colorbar (large, prominent)
-ax_cb = fig.add_axes([0.71, 0.32, 0.03, 0.46])
-cbar_data = np.linspace(0, 1, 256).reshape(-1, 1)
-ax_cb.imshow(cbar_data[::-1], aspect='auto', cmap='viridis', extent=[0, 1, 0, 1])
-ax_cb.set_xticks([])
-ax_cb.set_yticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
-ax_cb.set_yticklabels(['0.0', '0.2', '0.4', '0.6', '0.8', '1.0'], fontsize=8)
-ax_cb.yaxis.tick_right()
-ax_cb.tick_params(axis='y', length=3, pad=3)
-
-# Annotations on colorbar
-ax3.text(2.8, 19.2, 'navigable', fontsize=8, color='#1a9850', fontweight='bold', ha='right')
-ax3.text(2.8, 7.8, 'ambiguous', fontsize=8, color='#c0392b', fontweight='bold', ha='right')
-
-# Divider
-ax3.plot([0.8, 9.2], [6.8, 6.8], '-', color='#e0e0d8', lw=0.8)
-
-# Method section
-ax3.text(5, 6.0, 'LOO Explained Variation', fontsize=11, fontweight='bold', color='#333',
-         ha='center', family='serif')
-ax3.text(5, 5.2, 'For each point in control space:', fontsize=8.5, color='#555', ha='center')
-
-steps = ['Build outcome neighborhood', 'Fit local ridge inverse', 'Score via LOO residuals']
-for idx, text in enumerate(steps):
-    yy = 4.3 - idx * 0.9
-    ax3.add_patch(Circle((2.2, yy), 0.3, fc=(54/255, 92/255, 141/255, 0.12), ec='none', zorder=3))
-    ax3.text(2.2, yy, str(idx+1), fontsize=8.5, color='#365c8d', ha='center', va='center', fontweight='bold')
-    ax3.text(2.9, yy, text, fontsize=8.5, color='#444', ha='left', va='center')
-
-# Arrow to formula
-ax3.annotate('', xy=(5, 1.65), xytext=(5, 2.15),
-            arrowprops=dict(arrowstyle='->', color='#365c8d', lw=1.2))
-
-# Formula box
-formula_box = FancyBboxPatch((1.5, 0.7), 7.0, 0.85, boxstyle="round,pad=0.12",
-                              fc='#f0f4f8', ec='#365c8d', lw=0.8, zorder=2)
-ax3.add_patch(formula_box)
-ax3.text(5, 1.2, r'$e = 1 - \|R\|_F^2 \,/\, \|X\|_F^2$', fontsize=11, color='#333',
-         ha='center', va='center', family='serif')
-
-# Subtle flow arrows from left panels to right panel
-for yy in [0.72, 0.26]:
-    fig.patches.append(FancyArrowPatch(
-        (0.545, yy), (0.575, yy), transform=fig.transFigure,
-        arrowstyle='->', color='#ccc', lw=0.8, mutation_scale=8, zorder=0))
-
-plt.savefig('graphical_abstract_v4.png', dpi=250, bbox_inches='tight',
-            facecolor='#fafaf7', edgecolor='none')
-plt.savefig('graphical_abstract_v4.pdf', bbox_inches='tight',
-            facecolor='#fafaf7', edgecolor='none')
-print("Done!")
+fig.savefig("graphical_abstract.pdf", bbox_inches="tight")
+fig.savefig("graphical_abstract.png", bbox_inches="tight", dpi=200)
+print("Saved")

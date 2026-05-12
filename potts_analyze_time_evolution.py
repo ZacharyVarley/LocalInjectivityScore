@@ -293,7 +293,12 @@ def _smooth_nan(img: np.ndarray, sigma_px: float) -> np.ndarray:
     val = _conv1d_reflect(val, k, axis=1)
     msk = _conv1d_reflect(mask, k, axis=0)
     msk = _conv1d_reflect(msk, k, axis=1)
-    out = np.divide(val, np.maximum(msk, 1e-12), where=(msk > 1e-12))
+    out = np.divide(
+        val,
+        np.maximum(msk, 1e-12),
+        out=np.zeros_like(val),
+        where=(msk > 1e-12),
+    )
     out[msk < 1e-12] = np.nan
     return out
 
@@ -1011,9 +1016,15 @@ def main() -> None:
         default="potts_data_time_evolution/time_evolution/potts_sims_q3_128x128_steps300.h5",
         help="Raw time-evolution HDF5 from potts_gen_time_evolution.py",
     )
-    ap.add_argument("--h5_step100", type=str, default="", help="Descriptor HDF5 for step 100")
-    ap.add_argument("--h5_step200", type=str, default="", help="Descriptor HDF5 for step 200")
-    ap.add_argument("--h5_step300", type=str, default="", help="Descriptor HDF5 for step 300")
+    ap.add_argument(
+        "--snapshot_steps",
+        type=str,
+        default="100,200,300",
+        help="Comma-separated list of snapshot steps to analyze, e.g. '10,50,100,200,300'",
+    )
+    ap.add_argument("--h5_step100", type=str, default="", help="Descriptor HDF5 for step 100 (deprecated; use --snapshot_steps)")
+    ap.add_argument("--h5_step200", type=str, default="", help="Descriptor HDF5 for step 200 (deprecated; use --snapshot_steps)")
+    ap.add_argument("--h5_step300", type=str, default="", help="Descriptor HDF5 for step 300 (deprecated; use --snapshot_steps)")
 
     ap.add_argument("--potts_analysis_dir", type=str, default=Config.potts_analysis_dir)
     ap.add_argument("--run_name", type=str, default=Config.run_name)
@@ -1099,11 +1110,14 @@ def main() -> None:
     )
 
     raw_h5 = Path(args.raw_h5).expanduser().resolve() if str(args.raw_h5).strip() else None
-    steps = [
-        (100, str(args.h5_step100).strip()),
-        (200, str(args.h5_step200).strip()),
-        (300, str(args.h5_step300).strip()),
-    ]
+    snap_steps = sorted({int(s.strip()) for s in args.snapshot_steps.split(",") if s.strip()})
+    # Per-step h5 overrides (legacy; only used for the three original steps)
+    _legacy_h5 = {
+        100: str(args.h5_step100).strip(),
+        200: str(args.h5_step200).strip(),
+        300: str(args.h5_step300).strip(),
+    }
+    steps = [(s, _legacy_h5.get(s, "")) for s in snap_steps]
 
     out_root = ensure_dir(Path(cfg.potts_analysis_dir) / cfg.run_name)
     figs_dir = ensure_dir(out_root / "figs")
@@ -1142,9 +1156,11 @@ def main() -> None:
             if not np.allclose(X_ref, X, rtol=1e-6, atol=1e-8):
                 raise ValueError("Parameter grids differ across snapshots; cannot compare heatmaps reliably.")
 
-    # Combined 3-panel figure
-    fig, axes = plt.subplots(1, 3, figsize=(15.2, 4.8), dpi=cfg.dpi)
-    steps_sorted = [100, 200, 300]
+    # Combined N-panel figure
+    steps_sorted = snap_steps
+    fig, axes = plt.subplots(1, len(steps_sorted), figsize=(5.1 * len(steps_sorted), 4.8), dpi=cfg.dpi)
+    if len(steps_sorted) == 1:
+        axes = [axes]
     last_im = None
 
     for ax, step in zip(axes, steps_sorted):

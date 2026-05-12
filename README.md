@@ -20,6 +20,7 @@ inverse mapping. Includes basic Cahn-Hilliard and Potts model data generation.
 - **potts_*** - Potts model analysis
   - `potts_gen.py` - Potts model data generation
   - `potts_analyze_explained_fraction.py` - Potts data analysis
+  - `potts_publication_figures.py` - Unified publication figure generation for the Potts heatmap and Corr2D mosaic
 
 - **Utilities**
   - `injectivity_analysis_helpers.py` - Helper functions for injectivity analysis
