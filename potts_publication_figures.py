@@ -5,10 +5,10 @@ potts_publication_figures.py
 
 Unified publication script for the two Potts figures:
   1) heatmap_explained_frac_lines.(png|pdf)
-  2) potts_control_lines_corr2d_avg_mosaic_00_01_11_12.(png|pdf)
+  2) potts_traversals.(png|pdf) and potts_traversals_profiles.(png|pdf)
 
 The control-space sweeps are defined once and shared by both figures.
-By default, the high-f0 and low-f0 temperature sweeps extend from T=0.6 to T=1.2.
+By default, the high-f0 and low-f0 temperature sweeps extend from T=0.6 to T=1.1.
 """
 
 from __future__ import annotations
@@ -361,68 +361,26 @@ def save_explained_fraction_figure(
     plt.close(fig)
 
 
-def _build_mosaics(
-    corr_high: np.ndarray,
-    corr_mid: np.ndarray,
-    corr_low: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    n_pairs = int(corr_high.shape[1])
-    vmin = np.zeros((n_pairs,), dtype=np.float64)
-    vmax = np.zeros((n_pairs,), dtype=np.float64)
-    for pair_idx in range(n_pairs):
-        all_pair = np.concatenate(
-            [corr_high[:, pair_idx], corr_mid[:, pair_idx], corr_low[:, pair_idx]],
-            axis=0,
-        )
-        vmin[pair_idx] = float(np.min(all_pair))
-        vmax[pair_idx] = float(np.max(all_pair))
-
-    def make_group_mosaics(group: np.ndarray) -> np.ndarray:
-        mosaics = []
-        for sample_idx in range(group.shape[0]):
-            tiles = [
-                control_viz.normalize01(group[sample_idx, pair_idx], vmin[pair_idx], vmax[pair_idx])
-                for pair_idx in range(n_pairs)
-            ]
-            mosaics.append(control_viz.make_mosaic_2x2(tiles[0], tiles[1], tiles[2], tiles[3], pad=2))
-        return np.stack(mosaics, axis=0)
-
-    return make_group_mosaics(corr_high), make_group_mosaics(corr_mid), make_group_mosaics(corr_low)
+def _radial_profile(surface: np.ndarray, r_max: int) -> np.ndarray:
+    """Radial average of an fftshifted correlation surface for integer lags 0..r_max."""
+    H, W = surface.shape
+    yy, xx = np.indices((H, W))
+    r = np.rint(np.hypot(yy - H // 2, xx - W // 2)).astype(int)
+    keep = r <= r_max
+    return np.bincount(r[keep], weights=surface[keep]) / np.bincount(r[keep])
 
 
-def _add_row_labels(
-    top_ax: plt.Axes,
-    bottom_ax: plt.Axes,
-    panel_label: str,
-    pair_names: Iterable[str],
-) -> None:
-    pair_names = list(pair_names)
-    top_ax.text(
-        -0.24,
-        0.5,
-        "Microstructure",
-        transform=top_ax.transAxes,
-        fontsize=13,
-        fontweight="bold",
-        rotation=90,
-        va="center",
-        ha="center",
-    )
-    bottom_ax.text(
-        -0.24,
-        0.5,
-        f"Corr2D avg mosaic\n({pair_names[0]},{pair_names[1]}; {pair_names[2]},{pair_names[3]})",
-        transform=bottom_ax.transAxes,
-        fontsize=12,
-        fontweight="bold",
-        rotation=90,
-        va="center",
-        ha="center",
-    )
-    top_ax.text(-0.33, 1.05, panel_label, transform=top_ax.transAxes, fontsize=26, fontweight="bold")
+def local_score_at(X: np.ndarray, e: np.ndarray, temps: np.ndarray, fracs: np.ndarray, n_nn: int = 8) -> np.ndarray:
+    """Mean score of the n_nn dataset samples nearest to each traversal point (standardized controls)."""
+    mu, sd = X.mean(axis=0), X.std(axis=0)
+    Xs = (X - mu) / sd
+    Q = (np.stack([temps, fracs], axis=1) - mu) / sd
+    d = np.linalg.norm(Q[:, None, :] - Xs[None, :, :], axis=2)
+    nn = np.argsort(d, axis=1)[:, :n_nn]
+    return e[nn].mean(axis=1)
 
 
-def save_corr2d_mosaic_figure(
+def save_traversal_figure(
     outbase: Path,
     sweeps: ControlSweeps,
     micro_high: np.ndarray,
@@ -431,48 +389,80 @@ def save_corr2d_mosaic_figure(
     corr_mid: np.ndarray,
     micro_low: np.ndarray,
     corr_low: np.ndarray,
-    pair_names: List[str],
     dpi: int,
+    e_high: np.ndarray,
+    e_mid: np.ndarray,
+    e_low: np.ndarray,
+    columns: List[int],
+    with_profiles: bool,
+    r_max: int = 12,
 ) -> None:
-    mosaics_high, mosaics_mid, mosaics_low = _build_mosaics(corr_high, corr_mid, corr_low)
+    """Microstructures along traversals A/B/C; optionally a last column of radial correlation profiles.
+
+    corr_* hold the repeat-averaged surfaces for pairs (0,0), (0,1), (1,1), (1,2); the profile
+    column shows the two autocorrelations, (0,0) solid and (1,1) dashed.
+    """
     group_specs = [
-        ("A", sweeps.temps_high, sweeps.fracs_high, micro_high, mosaics_high, "high"),
-        ("B", sweeps.temps_mid, sweeps.fracs_mid, micro_mid, mosaics_mid, "mid"),
-        ("C", sweeps.temps_low, sweeps.fracs_low, micro_low, mosaics_low, "low"),
+        ("A", sweeps.temps_high, sweeps.fracs_high, micro_high, corr_high, e_high, "T"),
+        ("B", sweeps.temps_mid, sweeps.fracs_mid, micro_mid, corr_mid, e_mid, "f"),
+        ("C", sweeps.temps_low, sweeps.fracs_low, micro_low, corr_low, e_low, "T"),
     ]
-    max_cols = max(int(group[3].shape[0]) for group in group_specs)
+    n_img = len(columns)
+    shades = plt.get_cmap("Blues")(np.linspace(0.35, 0.95, n_img))
 
-    fig = plt.figure(figsize=(2.55 * max_cols + 1.8, 15.5), dpi=dpi)
-    outer = gridspec.GridSpec(3, 1, figure=fig, hspace=0.22, left=0.08, right=0.995, top=0.97, bottom=0.05)
+    width = 1.55 * n_img + (2.35 if with_profiles else 0.0) + 0.45
+    fig = plt.figure(figsize=(width, 5.9), dpi=dpi)
+    ratios = [1.0] * n_img + ([0.22, 1.3] if with_profiles else [])
+    gs = gridspec.GridSpec(3, len(ratios), figure=fig, width_ratios=ratios, hspace=0.42, wspace=0.06,
+                           left=0.45 / width, right=1.0 - 0.1 / width, top=0.90, bottom=0.08)
 
-    for group_idx, (label, temps, fracs, micro, mosaics, mode) in enumerate(group_specs):
-        n_cols = int(micro.shape[0])
-        inner = gridspec.GridSpecFromSubplotSpec(2, n_cols, subplot_spec=outer[group_idx], hspace=0.03, wspace=0.03)
-        top_axes: List[plt.Axes] = []
-        bottom_axes: List[plt.Axes] = []
+    for g_idx, (label, temps, fracs, micro, corr, e_vals, var) in enumerate(group_specs):
+        for j, c in enumerate(columns):
+            ax = fig.add_subplot(gs[g_idx, j])
+            ax.imshow(micro[c], cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            swept = f"$T={temps[c]:.1f}$" if var == "T" else f"$f_0={fracs[c]:.2f}$"
+            ax.set_title(f"{swept},  $e={e_vals[c]:.2f}$", fontsize=8, pad=3)
+            for sp in ax.spines.values():
+                sp.set_edgecolor(shades[j] if with_profiles else "0.3")
+                sp.set_linewidth(2.0 if with_profiles else 0.6)
+            if j == 0:
+                fixed = f"fixed $f_0={fracs[0]:.1f}$" if var == "T" else f"fixed $T={temps[0]:.1f}$"
+                ax.text(-0.22, 1.19, label, transform=ax.transAxes, fontsize=13, fontweight="bold", va="bottom")
+                ax.text(-0.02, 1.21, fixed, transform=ax.transAxes, fontsize=9, va="bottom")
 
-        for col_idx in range(n_cols):
-            ax_top = fig.add_subplot(inner[0, col_idx])
-            ax_bottom = fig.add_subplot(inner[1, col_idx])
-            top_axes.append(ax_top)
-            bottom_axes.append(ax_bottom)
+        if with_profiles:
+            axp = fig.add_subplot(gs[g_idx, -1])
+            lags = np.arange(r_max + 1)
+            for j, c in enumerate(columns):
+                axp.plot(lags, _radial_profile(corr[c, 0], r_max), "-", color=shades[j], lw=1.6)
+                axp.plot(lags, _radial_profile(corr[c, 2], r_max), "--", color=shades[j], lw=1.6)
+            axp.axhline(0.0, color="0.6", lw=0.6)
+            axp.set_xlim(0, r_max)
+            axp.set_ylim(-0.01, 0.26)
+            axp.set_yticks([0.0, 0.1, 0.2])
+            axp.tick_params(labelsize=7)
+            axp.spines["top"].set_visible(False)
+            axp.spines["right"].set_visible(False)
+            axp.set_title("radial correlation $C_{ii}(r)$", fontsize=8, pad=3)
+            if g_idx == 2:
+                axp.set_xlabel("lag $r$ (sites)", fontsize=8)
+            if g_idx == 0:
+                axp.legend(
+                    handles=[plt.Line2D([], [], color="0.3", ls="-", lw=1.6, label="state 0"),
+                             plt.Line2D([], [], color="0.3", ls="--", lw=1.6, label="state 1")],
+                    fontsize=7, frameon=False, loc="upper right", handlelength=2.2,
+                )
 
-            ax_top.imshow(micro[col_idx], cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
-            ax_bottom.imshow(mosaics[col_idx], cmap="gray", vmin=0.0, vmax=1.0, interpolation="bilinear")
-            ax_top.set_axis_off()
-            ax_bottom.set_axis_off()
-
-            if mode == "mid":
-                title = f"$f_0={fracs[col_idx]:.2f}$  $T={temps[col_idx]:.1f}$"
-            else:
-                title = f"$T={temps[col_idx]:.1f}$  $f_0={fracs[col_idx]:.1f}$"
-            ax_top.set_title(title, fontsize=12, pad=6)
-
-        _add_row_labels(top_axes[0], bottom_axes[0], label, pair_names)
+    note = "state 0 black, state 1 gray, state 2 white"
+    if with_profiles:
+        note += "; profile color matches the frame of the corresponding microstructure"
+    fig.text(0.45 / width, 0.02, note, fontsize=7, color="0.25")
 
     outbase.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(outbase) + ".png", dpi=int(dpi), bbox_inches="tight")
-    fig.savefig(str(outbase) + ".pdf", bbox_inches="tight")
+    fig.savefig(str(outbase) + ".png", dpi=int(dpi))
+    fig.savefig(str(outbase) + ".pdf")
     plt.close(fig)
 
 
@@ -483,7 +473,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--dpi", type=int, default=300)
 
     ap.add_argument("--temp_start", type=float, default=0.6)
-    ap.add_argument("--temp_stop", type=float, default=1.2)
+    ap.add_argument("--temp_stop", type=float, default=1.1)
     ap.add_argument("--temp_step", type=float, default=0.1)
     ap.add_argument("--frac_low", type=float, default=0.20)
     ap.add_argument("--frac_high", type=float, default=0.80)
@@ -493,6 +483,13 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="0.25,0.35,0.45,0.55,0.65,0.75",
         help="Comma-separated f0 values for the vertical sweep",
+    )
+
+    ap.add_argument(
+        "--traversal_columns",
+        type=str,
+        default="0,2,4,5",
+        help="Indices of the sweep points shown in the traversal figures",
     )
 
     ap.add_argument("--prepend_phase_fractions_to_Y", type=int, default=1 if analysis.Config.prepend_phase_fractions_to_Y else 0)
@@ -664,18 +661,25 @@ def main() -> None:
         progress_every=int(args.progress_every),
     )
 
-    save_corr2d_mosaic_figure(
-        outbase=outdir / "potts_control_lines_corr2d_avg_mosaic_00_01_11_12",
-        sweeps=sweeps,
-        micro_high=micro_high,
-        corr_high=corr_high,
-        micro_mid=micro_mid,
-        corr_mid=corr_mid,
-        micro_low=micro_low,
-        corr_low=corr_low,
-        pair_names=pair_names,
-        dpi=int(args.dpi),
-    )
+    e_all = metrics["explained_frac"]
+    columns = [int(tok) for tok in str(args.traversal_columns).split(",")]
+    for name, with_profiles in (("potts_traversals", False), ("potts_traversals_profiles", True)):
+        save_traversal_figure(
+            outbase=outdir / name,
+            sweeps=sweeps,
+            micro_high=micro_high,
+            corr_high=corr_high,
+            micro_mid=micro_mid,
+            corr_mid=corr_mid,
+            micro_low=micro_low,
+            corr_low=corr_low,
+            dpi=int(args.dpi),
+            e_high=local_score_at(X, e_all, sweeps.temps_high, sweeps.fracs_high),
+            e_mid=local_score_at(X, e_all, sweeps.temps_mid, sweeps.fracs_mid),
+            e_low=local_score_at(X, e_all, sweeps.temps_low, sweeps.fracs_low),
+            columns=columns,
+            with_profiles=with_profiles,
+        )
 
     metadata = {
         "created_utc": analysis._utc_now_z(),
@@ -685,9 +689,8 @@ def main() -> None:
         "pca": pca_info,
         "figures": {
             "heatmap_explained_frac_lines": str(outdir / "heatmap_explained_frac_lines.png"),
-            "potts_control_lines_corr2d_avg_mosaic_00_01_11_12": str(
-                outdir / "potts_control_lines_corr2d_avg_mosaic_00_01_11_12.png"
-            ),
+            "potts_traversals": str(outdir / "potts_traversals.png"),
+            "potts_traversals_profiles": str(outdir / "potts_traversals_profiles.png"),
         },
     }
     (outdir / "potts_publication_figures_metadata.json").write_text(json.dumps(metadata, indent=2))
